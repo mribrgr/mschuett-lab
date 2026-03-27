@@ -14,6 +14,13 @@ spec:
       values: |
         operator:
           watchNamespace: "bricklink-sync"
+        resources:
+          limits:
+            cpu: 500m
+            memory: 500Mi
+          requests:
+            cpu: 100m
+            memory: 200Mi
   destination:
     server: https://kubernetes.default.svc
     namespace: bricklink-sync

@@ -6,7 +6,7 @@ metadata:
     argocd.argoproj.io/sync-wave: "1"
 spec:
   acme:
-    email: info@not-just-a-developer.com
+    email: info@mauritiusberger.de
     server: https://acme-staging-v02.api.letsencrypt.org/directory
     privateKeySecretRef:
       # Secret resource that will be used to store the account's private key.
@@ -25,7 +25,7 @@ metadata:
     argocd.argoproj.io/sync-wave: "1"
 spec:
   acme:
-    email: info@not-just-a-developer.com
+    email: info@mauritiusberger.de
     server: https://acme-v02.api.letsencrypt.org/directory
     privateKeySecretRef:
       name: letsencrypt-prod-issuer-account-key

@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: argocd-bricklink-sync-cm
+  name: argocd-bricklink-scraping-cm
 data:
   service.github: |
     appID: 1995792

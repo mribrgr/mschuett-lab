@@ -1,2 +1,32 @@
+# ── Klartext-Secrets: NIE committen ───────────────────────────────────────────
+# Dieses Repo ist PUBLIC (github.com/mribrgr/mschuett-lab). Bis 2026-08-05 lagen
+# hier ein SSH-Private-Key (gh-hardware.yaml), ein zweiter Deploy-Key
+# (argocd-ssh-key), eine cluster-admin-kubeconfig und zwei Server-Passwörter —
+# alle NICHT ignoriert, also ein `git add -A` vom Veröffentlichen entfernt.
+# Verschlüsselte Gegenstücke liegen jetzt in secrets/*.age (agenix).
+kubeconfig
+kubeconfig.*
+gh-hardware.yaml
+argocd-ssh-key
+argocd-ssh-key.pub
+*.key
+*.pem
+*.p12
+id_rsa*
+id_ed25519*
+
+# k8s-Secrets im Klartext (SealedSecret-Vorlagen). Die *-sealed-secret.yaml
+# dürfen und sollen ins Repo — nur die unverschlüsselten Vorlagen nicht.
 **-secret.yaml
 **-secret.yml
+
+# ── Ausnahmen: das MUSS ins Repo ──────────────────────────────────────────────
+# agenix-Secrets sind verschlüsselt; sie zu ignorieren wäre der ganze Zweck verfehlt.
+!secrets/*.age
+!**/*-sealed-secret.yaml
+!**/*-sealed-secret.yml
+
+# ── Sonstiges ─────────────────────────────────────────────────────────────────
+result
+result-*
+.direnv/

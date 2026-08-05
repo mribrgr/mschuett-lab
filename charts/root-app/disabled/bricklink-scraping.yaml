@@ -1,18 +1,18 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: bricklink-sync
+  name: bricklink-scraping
   finalizers:
   - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
-    repoURL: git@github.com:mribrgr/bricklink-sync.git
+    repoURL: git@github.com:mribrgr/bricklink-scraping.git
     path: deploy/chart/
     targetRevision: HEAD
   destination:
     server: https://kubernetes.default.svc
-    namespace: bricklink-sync
+    namespace: bricklink-scraping
   syncPolicy:
     automated:
       prune: true

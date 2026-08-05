@@ -13,7 +13,7 @@ spec:
     helm:
       values: |
         operator:
-          watchNamespace: "bricklink-sync"
+          watchNamespace: "bricklink-scraping"
         resources:
           limits:
             cpu: 500m
@@ -23,7 +23,7 @@ spec:
             memory: 200Mi
   destination:
     server: https://kubernetes.default.svc
-    namespace: bricklink-sync
+    namespace: bricklink-scraping
   syncPolicy:
     automated:
       prune: true

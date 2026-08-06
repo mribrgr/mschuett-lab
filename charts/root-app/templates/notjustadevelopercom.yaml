@@ -17,5 +17,18 @@ spec:
     automated:
       prune: true
       selfHeal: true
-    # syncOptions:
-    # - CreateNamespace=true
+    syncOptions:
+    # ServerSideApply: ohne das scheitert der Erst-Sync auf einem FRISCHEN Cluster.
+    #
+    # Verifiziert 2026-08-06 beim Neuaufbau: das Chart liefert die velero-CRDs UND
+    # gleichzeitig Ressourcen, die sie benutzen (VolumeSnapshotLocation/default,
+    # BackupStorageLocation, Schedule). ArgoCDs client-seitiger Dry-Run kennt die
+    # Kinds beim ersten Durchlauf noch nicht und lehnt sie ab:
+    #   "one or more synchronization tasks are not valid (retried 5 times)"
+    # → App bleibt OutOfSync/Missing, velero kommt nie hoch, und ohne velero kein
+    # Restore. Im ALTEN Cluster fiel das nie auf, weil die CRDs dort seit 323 Tagen
+    # existierten.
+    #
+    # ServerSideApply lässt den API-Server validieren statt ArgoCD lokal, wodurch
+    # CRD und CR im selben Sync durchgehen.
+    - ServerSideApply=true

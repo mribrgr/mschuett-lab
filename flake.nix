@@ -28,32 +28,38 @@
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.home-manager.follows = "home-manager";
     };
+
     # Geteilte Module (base/) aus dem zentralen nix-config.
     #
-    # BEWUSST als gepinnter Input und NICHT als relativer Pfad `../base`:
-    # mschuett-lab ist ein EIGENES Repo (anderer Gesellschafter) und muss
-    # standalone evaluieren. Die anderen Welten (mac/, homelab/, lab/) liegen
-    # IM nix-config-Repo und dürfen `../base` benutzen — diese Welt nicht.
-    # Nebeneffekt (gewollt): base/ ist hier über flake.lock gepinnt, ein
-    # base-Umbau in nix-config kann diese Kunden-/Gesellschafter-Infra nicht
-    # unangekündigt umkonfigurieren. Update bewusst via:
-    #   nix flake update nix-config
+    # ── Warum hier ein GIT-Input steht und kein lokaler Pfad ──────────────────
+    # Ziel war „immer gegen die lokale nix-config evaluieren, ohne jedes Mal
+    # `nix flake update`". Mit `url = "path:/Users/.../nix-config"` geht das NICHT:
+    # `path:`-Inputs werden ebenfalls über narHash gepinnt, jede Änderung an base/
+    # bricht die Evaluation dann mit (2026-08-05 empirisch geprüft):
+    #   error: NAR hash mismatch in input 'path:/Users/.../nix-config?narHash=sha256-c5Dx…'
+    #   expected 'sha256-c5Dx…' but got 'sha256-Ygq…'
+    # Das ist prinzipiell so: eine reine Flake-Evaluation kann kein veränderliches
+    # externes Verzeichnis lesen — der Lock IST der Mechanismus. Ein `import` per
+    # absolutem Pfad wäre impure und wird abgelehnt.
     #
-    # flake = false: base/ ist kein Flake, sondern ein Modul-VERZEICHNIS.
+    # Deshalb: committed steht der portable git-Input, und für die tägliche Arbeit
+    # wird pro Aufruf überschrieben (kein Lock-Churn, kein flake update):
+    #
+    #   nix eval --override-input nix-config path:$HOME/projects/nix-config \
+    #     .#nixosConfigurations.netcup.config.networking.hostName
+    #
+    #   nixos-rebuild switch --flake .#netcup \
+    #     --override-input nix-config path:$HOME/projects/nix-config \
+    #     --target-host root@… --build-on-remote
+    #
+    # Siehe TODO.md 0c. Sobald base/ gepusht ist, ist der Override unnötig.
     #
     # ⚠️ BRANCH, nicht main: die Vier-Welten-Struktur mit base/ liegt (Stand
-    # 2026-08-05) auf refactor/multiworld-restructure. Auf main existiert base/
-    # NICHT (dort nur homelab/). Nach dem Merge auf main hier umstellen auf
-    #   url = "github:mribrgr/nix-config";
-    # git+https statt github:: der github-Fetcher kann Branch-Namen MIT SLASH nicht
-    # auflösen (er encodiert zu refactor%2F… und die commits-API antwortet 404).
-    # https statt ssh, weil für dieses Konto KEIN SSH-Key bei GitHub liegt
-    # (`gh auth`: "Git operations protocol: https"); die Credentials kommen aus
-    # dem osxkeychain-Credential-Helper.
+    # 2026-08-05) auf refactor/multiworld-restructure; auf main existiert base/
+    # nicht. git+https statt github:, weil der github-Fetcher Branch-Namen MIT
+    # SLASH nicht auflöst (encodiert zu refactor%2F…, commits-API antwortet 404).
     #
-    # Für den Deploy irrelevant, dass nix-config privat ist: `nixos-rebuild
-    # --target-host` / nixos-anywhere baut die Closure LOKAL und schiebt sie auf
-    # die Box — der Server fetcht keine Inputs und braucht keinen GitHub-Zugang.
+    # flake = false: base/ ist kein Flake, sondern ein Modul-VERZEICHNIS.
     nix-config = {
       url = "git+https://github.com/mribrgr/nix-config?ref=refactor/multiworld-restructure";
       flake = false;
@@ -69,7 +75,12 @@
         "x86_64-linux"
       ];
 
-      # Gleiche Reihenfolge/Struktur wie lab/flake.nix, nur base/ über den Input.
+      # Struktur wie lab/flake.nix — import-tree über die Verzeichnisse, keine
+      # manuelle Dateiliste. base/ kommt über den Input statt über `../base`,
+      # weil dieses Repo außerhalb von nix-config liegt.
+      #
+      # base/_network.nix wird dabei automatisch übersprungen (Unterstrich-Präfix
+      # = reine Daten, kein Modul); modules/k3s.nix liest es direkt per `import`.
       # base/secrets/ bleibt außen vor: die agenix-Rules-Datei ist kein Modul.
       imports = [
         (import-tree [

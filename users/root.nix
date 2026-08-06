@@ -1,13 +1,25 @@
 {
   # root-Zugang der mschuett-lab-Hosts.
   #
-  # ZWEI Keys bewusst, damit ein Neuaufbau nicht aussperrt:
-  #   1. macbook-agenix — derselbe Key wie in nix-config/lab/users/root.nix
-  #      (flottenweit einheitlich, gleichzeitig agenix-Recipient).
-  #   2. id_netcup_max_1 — der Key, mit dem die netcup-Box HEUTE erreichbar ist
-  #      (aus dem privaten Key abgeleitet; die .pub-Datei fehlte lokal).
-  #      Solange nicht verifiziert ist, dass (1) auf der neuen Box greift, bleibt
-  #      dieser Key die Rückfalltür. Danach kann er raus.
+  # Die Keys stehen literal HIER, weil sie hierher gehören: eine Host-Config
+  # deklariert, wer sich einloggen darf. Das ist kein Duplikat von
+  # nix-config/mac/modules/ssh-client.nix — dort steht ein PRIVATE-Key-PFAD
+  # (`~/.ssh/id_ed25519`), hier der zugehörige PUBLIC KEY. Verschiedene Werte,
+  # also nichts zu deduplizieren.
+  #
+  # Der Weg über die nixosConfiguration der anderen Welten (damit ssh-client sich
+  # ableiten könnte) ist bewusst versperrt: er würde alle Welten-Locks in einen
+  # Eval ziehen, was nix-config/flake.nix explizit ausschließt.
+  #
+  # KONVENTION für neue Keys: `~/.ssh/id_<name>` auf der Client-Seite.
+  #
+  # ZWEI Keys, damit der Neuaufbau nicht aussperrt:
+  #   1. macbook-agenix — die Flotten-Adminidentität, zugleich agenix-Recipient.
+  #      Nach dem Cutover der einzige nötige Key.
+  #   2. id_netcup_max_1 — Rückfalltür, solange die Box noch Ubuntu fährt (sie
+  #      akzeptiert nur diesen). Aus dem privaten Key abgeleitet, die .pub fehlte
+  #      lokal. Nach dem Cutover ersatzlos löschen, zusammen mit dem Alias
+  #      `netcup_max_1` in ssh-client.nix.
   #
   # HINWEIS: der ssh-rsa-Key aus dem alten configuration.nix war ein DRITTER,
   # heute nirgends mehr vorhandener Key (Vorgänger-Server) — absichtlich NICHT

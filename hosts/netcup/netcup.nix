@@ -1,4 +1,4 @@
-{ self, ... }:
+{ self, inputs, ... }:
 {
   # netcup VPS 1000 ARM G11 SE — Single-Node k3s.
   #
@@ -26,10 +26,26 @@
         self.outputs.modules.nixos.ssh
         self.outputs.modules.nixos.user-root
         self.outputs.modules.nixos.k3s-netcup
+        # Leaf-Module: setzen NUR services.k3s.manifests, kein k3s-Base-Import →
+        # kein Diamond auf services.k3s.package.
+        #
+        # Reihenfolge der Zeilen ist irrelevant (Nix-Module sind kommutativ); die
+        # LAUFZEIT-Reihenfolge ergibt sich daraus, dass all das k3s-Bootstrap ist
+        # und damit VOR ArgoCD existiert. Genau das ist der Zweck:
+        #   sealed-secrets  da, bevor irgendein SealedSecret gesynct wird
+        #   cert-manager    CRDs da, bevor ArgoCD die ClusterIssuer anlegt
+        #   gateway         Gateway-API-CRDs da, bevor Cilium die GatewayClass baut
+        self.outputs.modules.nixos.sealed-secrets
+        self.outputs.modules.nixos.cert-manager
+        self.outputs.modules.nixos.gateway
         self.outputs.modules.nixos.argocd
       ];
 
       nixpkgs.hostPlatform = "aarch64-linux";
+      # Literal, nicht aus _network.nix: die gepinnte nix-config-Revision hat
+      # `sites.netcup` noch als String — siehe den Fallback-Block in
+      # modules/k3s.nix. Nach dem Push von base/ kann das wieder auf
+      # `net.sites.netcup.hostName` zeigen.
       networking.hostName = "netcup";
       networking.domain = "powersrv.de";
 

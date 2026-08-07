@@ -36,13 +36,27 @@
             spec = {
               repo = "https://charts.jetstack.io";
               chart = "cert-manager";
-              # Gepinnt wie vorher im Chart — cert-manager-Upgrades sind
-              # CRD-Migrationen, die nicht nebenbei passieren sollen.
-              version = "1.18.2";
+              # 1.21.1 = neueste stabile Release (2026-07-29). Angehoben von 1.18.2
+              # zusammen mit dem Gateway-API-Umstieg, weil die ACME-Solver dabei von
+              # `http01.ingress` auf `http01.gatewayHTTPRoute` wechseln.
+              # cert-manager-Upgrades sind CRD-Migrationen — nicht nebenbei machen.
+              version = "1.21.1";
               targetNamespace = "cert-manager";
               createNamespace = true;
               valuesContent = ''
-                installCRDs: true
+                crds:
+                  enabled: true
+                # Gateway-API-Unterstützung. Seit cert-manager 1.15 NICHT mehr hinter
+                # einem Feature-Gate ("no longer gated behind a feature flag"), muss
+                # aber weiterhin explizit eingeschaltet werden. Ohne das ignoriert
+                # cert-manager sowohl die Gateway-Annotation als auch den
+                # gatewayHTTPRoute-Solver — die Zertifikate würden stillschweigend
+                # nie ausgestellt.
+                config:
+                  apiVersion: controller.config.cert-manager.io/v1alpha1
+                  kind: ControllerConfiguration
+                  gatewayAPI:
+                    enabled: true
               '';
             };
           }

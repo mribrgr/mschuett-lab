@@ -7,7 +7,9 @@ service:
   type: ClusterIP
   port: 80
 
-ingress:
-  enabled: true
-  host: www.steinaberfein.de
-  
+# Kein `ingress:`-Block mehr (2026-08-07). Das Routing läuft über eine HTTPRoute
+# am zentralen Gateway (templates/httproute.yaml), die Hostnamen stehen dort.
+#
+# Der alte Block war ohnehin irreführend: `host: www.steinaberfein.de` wurde von
+# templates/ingress.yaml gar nicht gelesen — dort war `steinaberfein.de`
+# hartcodiert. Ergebnis: www lief auf 404. Jetzt werden beide Namen bedient.

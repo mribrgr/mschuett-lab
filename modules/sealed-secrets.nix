@@ -36,7 +36,15 @@
               namespace = "kube-system";
             };
             spec = {
-              repo = "https://bitnami-labs.github.io/sealed-secrets";
+              # ⚠️ bitnami, NICHT bitnami-labs. Das Projekt ist am 2026-06-15 von der
+              # Org `bitnami-labs` nach `bitnami` umgezogen, und GitHub-Pages-URLs
+              # werden NICHT weitergeleitet (nur git/Browser-Links).
+              #   https://bitnami-labs.github.io/sealed-secrets/index.yaml -> 404
+              #   https://bitnami.github.io/sealed-secrets/index.yaml       -> 200
+              # Deshalb lief der ALTE Cluster problemlos (installiert vor 322 Tagen,
+              # also vor dem Umzug), während der Neuaufbau am 2026-08-06 mit
+              # „404 Not Found" scheiterte. Verifiziert: die neue URL führt 2.17.7.
+              repo = "https://bitnami.github.io/sealed-secrets";
               chart = "sealed-secrets";
               version = "2.17.7";
               # kube-system wie vorher — die Key-Secrets, die wir wiederherstellen,

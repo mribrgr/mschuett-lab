@@ -1,0 +1,127 @@
+# Zentrales Gateway für ALLE Hosts des Clusters (2026-08-07, Ablösung von traefik).
+#
+# Ein Gateway statt eines pro App: die HTTPRoutes der einzelnen Anwendungen hängen
+# sich per `parentRefs` hier ein — steinaberfeinde aus DIESEM Repo,
+# notjustadevelopercom aus dem eigenen. Damit gibt es genau eine Stelle, an der
+# Listener, TLS und die öffentliche Adresse definiert sind.
+#
+# gatewayClassName: cilium — bereitgestellt von `gatewayAPI.enabled=true` in
+# modules/k3s.nix. Die Adresse kommt aus Ciliums LB-IPAM-Pool
+# (modules/gateway.nix), seit servicelb/klipper abgeschaltet ist.
+#
+# TLS: die Annotation unten lässt cert-manager für JEDEN HTTPS-Listener mit
+# `certificateRefs` ein Certificate anlegen (gateway-shim). Zwei Listener, die
+# denselben Secret-Namen referenzieren, landen in EINEM Zertifikat mit beiden
+# DNS-Namen — genau so teilen sich steinaberfein.de und www.steinaberfein.de das
+# Secret `steinaberfein-de-tls`.
+#
+# Voraussetzung dafür ist `config.gatewayAPI.enabled: true` am cert-manager
+# (modules/cert-manager.nix). Fehlt das, ignoriert cert-manager diese Annotation
+# STILL — keine Fehlermeldung, nur nie ein Zertifikat.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: main
+  namespace: default
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  gatewayClassName: cilium
+  listeners:
+    # HTTP bleibt offen: die ACME-HTTP-01-Challenge von cert-manager wird als
+    # HTTPRoute auf :80 eingehängt. Ohne diesen Listener kann kein Zertifikat
+    # erneuert werden.
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: All
+
+    # ── steinaberfein.de (+ www) ───────────────────────────────────────────────
+    # Beide Listener zeigen auf DASSELBE Secret → ein Zertifikat mit beiden Namen.
+    # www ist neu (2026-08-07): der alte traefik-Ingress kannte nur die Apex-Domain,
+    # obwohl values.yaml `www.steinaberfein.de` sagte — www lief deshalb auf 404.
+    # DNS für www zeigt bereits auf 152.53.15.24 (geprüft), ACME kann validieren.
+    - name: https-steinaberfein
+      protocol: HTTPS
+      port: 443
+      hostname: steinaberfein.de
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: steinaberfein-de-tls
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: https-steinaberfein-www
+      protocol: HTTPS
+      port: 443
+      hostname: www.steinaberfein.de
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: steinaberfein-de-tls
+      allowedRoutes:
+        namespaces:
+          from: All
+
+    # ── *.mauritiusberger.de (notjustadevelopercom) ────────────────────────────
+    # Je Host ein eigenes Secret, exakt wie unter traefik — dadurch bleiben die
+    # bereits ausgestellten Zertifikate gültig und es gibt keinen neuen
+    # Let's-Encrypt-Rate-Limit-Druck (5 identische Zertifikate/Woche).
+    - name: https-mauritiusberger
+      protocol: HTTPS
+      port: 443
+      hostname: mauritiusberger.de
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: mauritiusberger-de-tls
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: https-grocy
+      protocol: HTTPS
+      port: 443
+      hostname: grocy.mauritiusberger.de
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: grocy-mauritiusberger-de-tls
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: https-ghostfolio
+      protocol: HTTPS
+      port: 443
+      hostname: ghostfolio.mauritiusberger.de
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: ghostfolio-mauritiusberger-de-tls
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: https-n8n
+      protocol: HTTPS
+      port: 443
+      hostname: n8n.mauritiusberger.de
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: n8n-mauritiusberger-de-tls
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: https-paperless
+      protocol: HTTPS
+      port: 443
+      hostname: paperless.mauritiusberger.de
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: paperless-mauritiusberger-de-tls
+      allowedRoutes:
+        namespaces:
+          from: All

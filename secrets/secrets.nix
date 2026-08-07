@@ -21,16 +21,15 @@ let
   # vergessen wird.
   backup = "age1vu7ce5ggmh93kndr0fwmkcv843tfetkul5nt2h587ss6xw30ue8q34jv2u";
 
-  # ── netcup-Host-Key: EXISTIERT NOCH NICHT ──────────────────────────────────
-  # Die Box läuft heute Ubuntu; der NixOS-SSH-Host-Key entsteht erst beim ersten
-  # Boot nach dem nixos-anywhere-Install. Solange ist KEIN Host hier Recipient,
-  # d. h. der Server kann diese Secrets NICHT zur Aktivierungszeit selbst
-  # entschlüsseln — alles hier ist derzeit Recovery-Material für den Menschen.
+  # netcup-Host-Key. Damit entschlüsselt der Server seine Secrets zur
+  # AKTIVIERUNGSZEIT selbst (agenix nutzt /etc/ssh/ssh_host_ed25519_key als
+  # Identity, siehe base/modules/secrets-nixos.nix).
   #
-  # Nach dem ersten Boot:
-  #   ssh root@v2202505270128345138.powersrv.de cat /etc/ssh/ssh_host_ed25519_key.pub
-  # hier eintragen, `all` erweitern, dann `agenix -r`. Siehe TODO.md Punkt 3.
-  # netcup = "ssh-ed25519 AAAA... root@netcup";
+  # Es ist derselbe Key wie vor dem Umbau: nixos-anywhere lief mit
+  # `--copy-host-keys`, der Ubuntu-Host-Key hat den Neuaufbau also überlebt
+  # (verifiziert 2026-08-07, Fingerprint identisch vor/nach Install). Nebeneffekt:
+  # known_hosts blieb gültig, kein Host-Key-Warning.
+  netcup = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMfT7O/yvdtGLwe0+p1Vwft7Y/ED1w4YYT6OAyKjsZLG root@v2202505270128345138";
 
   all = [
     macbook
@@ -47,7 +46,16 @@ in
   # das v1.List-Format und keine PEM-Konkatenation — verifiziert 2026-08-05:
   # eine Bundle-PEM scheiterte an allen 7 SealedSecrets, das v1.List entschlüsselt
   # 23/23 Keys deckungsgleich mit den Live-Secrets.
-  "sealed-secrets-master-keys.age".publicKeys = all;
+  # `netcup` als Recipient, die anderen Secrets NICHT: nur diese Datei wird auf
+  # dem Host selbst gebraucht (damit das Einspielen der Keys nach einem Neuaufbau
+  # deklarativ statt manuell passieren kann). Alles andere ist reines
+  # Recovery-Material für den Menschen und hat auf dem Server nichts zu suchen.
+  #
+  # ⚠️ Enthält seit 2026-08-07 ZWÖLF Keys, nicht mehr elf: der frisch installierte
+  # Controller hat beim ersten Start einen eigenen erzeugt (`…key52k57`), und der
+  # ist inzwischen der AKTIVE Sealing-Key. Alles neu Verschlüsselte hängt an ihm —
+  # fehlt er im Backup, ist es nach dem nächsten Neuaufbau nicht mehr lesbar.
+  "sealed-secrets-master-keys.age".publicKeys = all ++ [ netcup ];
 
   # kubeconfig des ALTEN Clusters (cluster-admin). Nach dem Neuaufbau wertlos,
   # bis dahin der einzige Zugang für Restore/Verifikation.

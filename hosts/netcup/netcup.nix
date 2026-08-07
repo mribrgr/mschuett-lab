@@ -25,6 +25,12 @@
         self.outputs.modules.nixos.netcup-disk-config
         self.outputs.modules.nixos.ssh
         self.outputs.modules.nixos.user-root
+        # agenix. Setzt age.identityPaths auf /etc/ssh/ssh_host_ed25519_key —
+        # genau der Key, der seit 2026-08-07 Recipient von
+        # secrets/sealed-secrets-master-keys.age ist. Damit kann der Host seine
+        # Secrets zur Aktivierungszeit selbst entschlüsseln (verifiziert: der
+        # Host-Key liest alle 12 Keys) statt sie von Hand einzuspielen.
+        self.outputs.modules.nixos.secrets
         self.outputs.modules.nixos.k3s-netcup
         # Leaf-Module: setzen NUR services.k3s.manifests, kein k3s-Base-Import →
         # kein Diamond auf services.k3s.package.
@@ -37,8 +43,14 @@
         #   gateway         Gateway-API-CRDs da, bevor Cilium die GatewayClass baut
         self.outputs.modules.nixos.sealed-secrets
         self.outputs.modules.nixos.cert-manager
-        self.outputs.modules.nixos.gateway
         self.outputs.modules.nixos.argocd
+
+        # Gateway-API-CRDs (v1.6.1) + LB-IPAM. Aktiviert 2026-08-07 zusammen mit
+        # `--disable=traefik/--disable=servicelb` und cilium gatewayAPI=true.
+        # Die Reihenfolge ist wichtig: traefik muss WEG sein (es bringt eigene
+        # Gateway-CRDs in v1.5.1 mit, die den Cilium-Operator brechen), bevor diese
+        # v1.6.1-CRDs greifen.
+        self.outputs.modules.nixos.gateway
       ];
 
       nixpkgs.hostPlatform = "aarch64-linux";

@@ -1,3 +1,13 @@
+# ACME-Issuer. Seit 2026-08-07 über die Gateway API statt über traefik-Ingress.
+#
+# Der Solver legt für jede Challenge eine HTTPRoute an und hängt sie an den
+# HTTP-Listener des zentralen Gateways (templates/gateway.yaml). Vorher stand hier
+# `http01.ingress.class: traefik` — mit `--disable=traefik` gibt es keinen
+# Ingress-Controller mehr, der Solver hätte still nie validiert.
+#
+# ⚠️ Braucht `config.gatewayAPI.enabled: true` am cert-manager
+# (modules/cert-manager.nix). Ohne das ignoriert cert-manager den
+# gatewayHTTPRoute-Solver kommentarlos.
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
@@ -11,11 +21,13 @@ spec:
     privateKeySecretRef:
       # Secret resource that will be used to store the account's private key.
       name: letsencrypt-staging-issuer-account-key
-    # Add a single challenge solver, HTTP01 using traefik
     solvers:
-    - http01:
-        ingress:
-          class: traefik
+      - http01:
+          gatewayHTTPRoute:
+            parentRefs:
+              - name: main
+                namespace: default
+                kind: Gateway
 ---
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
@@ -30,6 +42,9 @@ spec:
     privateKeySecretRef:
       name: letsencrypt-prod-issuer-account-key
     solvers:
-    - http01:
-        ingress:
-          class: traefik
+      - http01:
+          gatewayHTTPRoute:
+            parentRefs:
+              - name: main
+                namespace: default
+                kind: Gateway

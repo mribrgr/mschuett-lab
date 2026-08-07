@@ -95,10 +95,17 @@
             # Cilium Gateway API (siehe modules/gateway.nix).
             "--disable-kube-proxy"
 
-            # traefik + servicelb bleiben BEWUSST aktiviert (nicht disabled wie im
-            # lab) — Begründung oben im Modulkopf. Beim Umstieg auf Gateway API:
-            #   "--disable=traefik" "--disable=servicelb"
-            # ergänzen und Ciliums LB-IPAM-Pool setzen.
+            # traefik + servicelb ABGESCHALTET (2026-08-07, Umstieg auf Gateway API).
+            # Ingress-Traffic läuft ab jetzt über Ciliums GatewayClass; die Adresse
+            # vergibt Ciliums LB-IPAM statt klipper (siehe modules/gateway.nix).
+            #
+            # ⚠️ REIHENFOLGE beim Umstieg: traefik bringt eigene Gateway-API-CRDs in
+            # v1.5.1 mit — genau die Version, die den Cilium-Operator bricht
+            # (cilium#45139). Erst traefik weg (nimmt seine CRDs mit), dann die
+            # gepinnten v1.6.1-CRDs aus modules/gateway.nix. Andersherum gibt es den
+            # Ownership-Konflikt „invalid ownership metadata" vom 2026-08-06.
+            "--disable=traefik"
+            "--disable=servicelb"
 
             # Der Cluster wird über den netcup-FQDN erreicht; ohne SAN schlägt
             # jeder externe kubectl-Zugriff mit Zertifikatsfehler fehl.
@@ -126,16 +133,32 @@
             "--cluster-dns=${net.cluster.clusterDns}"
           ];
 
-        # Cilium als CNI. Version 1.18.12 wie im lab und aus denselben Gründen:
-        # behebt den Gateway-API-Bug, bei dem ein HTTP-:80-Listener ohne hostname
-        # neben einem HTTPS-Listener mit hostname aus der CiliumEnvoyConfig fällt
-        # (→ :80 = 404 → ACME-HTTP-01 scheitert; cilium#36750/#44123, Fix #44492 ab
-        # 1.18.8). 1.18.12 ist das neueste 1.18 UND frei vom Opaque-Secret-Regress
-        # (#45705, nur 1.19.x).
+        # Cilium als CNI.
         #
-        # Bewusst NICHT aus dem lab übernommen:
-        #   • upgradeCompatibility — dies ist ein FRISCHER Cluster, kein 1.17→1.18.
-        #   • socketLB.hostNamespaceOnly — reiner gVisor-Workaround, hier kein gVisor.
+        # ── Upgrade-Pfad 1.18.12 → 1.19.6 → 1.20.0 (Stand 2026-08-07) ────────────
+        # Ziel ist 1.20.0 (neueste stabile Release, 2026-07-29) zusammen mit
+        # Gateway API v1.6.1 — laut Cilium-1.20-Doku genau die getestete Paarung
+        # („Cilium supports Gateway API v1.6.1 […] all the Core conformance tests
+        # are passed"). Dorthin aber in ZWEI Schritten: Cilium unterstützt nur
+        # EINEN Minor-Sprung am Stück, 1.18 → 1.20 direkt ist nicht supported.
+        # Schritt 1 (1.19.6) verifiziert 2026-08-07: Cilium Ok, KPR True, Cluster health
+        # 1/1, alle Hosts extern erreichbar. Jetzt Schritt 2: 1.20.0.
+        #
+        # Die zwei Gründe, aus denen das lab bewusst auf 1.18.12 stehen blieb, sind
+        # upstream erledigt (beide Issues geschlossen):
+        #   • #45705 „Gateway API: Cilium pre-creates TLS secrets as Opaque,
+        #     blocking cert-manager" — geschlossen 2026-05-04.
+        #   • #45139 „Cilium breaks with gateway-api v1.5.0" — geschlossen.
+        # Der ältere Gateway-:80-Listener-Bug (#36750/#44123, Fix #44492 ab 1.18.8)
+        # ist in 1.19/1.20 ohnehin enthalten.
+        #
+        # upgradeCompatibility hält die BPF-Map-Formate über den Sprung
+        # abwärtskompatibel und minimiert den Datapath-Churn beim Agent-Neustart
+        # (Single-Node = kein Failover, kurzer Netz-Blip). Nach verifiziertem
+        # 1.19-Betrieb auf "1.19" hochziehen bzw. beim Schritt auf 1.20 anpassen.
+        #
+        # Weiterhin NICHT übernommen: socketLB.hostNamespaceOnly — reiner
+        # gVisor-Workaround, hier läuft kein gVisor (siehe TODO.md 0e).
         manifests = lib.mkIf isServer {
           cilium.content = [
             {
@@ -148,12 +171,14 @@
               spec = {
                 repo = "https://helm.cilium.io/";
                 chart = "cilium";
-                version = "1.18.12";
+                version = "1.20.0";
                 targetNamespace = "kube-system";
                 # CNI-Henne-Ei: bootstrap=true lässt den Install-Job früh laufen und
                 # alle Taints tolerieren (sonst bleibt der frische Node NotReady).
                 bootstrap = true;
                 valuesContent = ''
+                  # Hält BPF-Map-Formate über den Minor-Sprung abwärtskompatibel.
+                  upgradeCompatibility: "1.19"
                   operator:
                     replicas: 1
                   ipam:
@@ -165,8 +190,10 @@
                   kubeProxyReplacement: true
                   k8sServiceHost: "${nc.publicIp}"
                   k8sServicePort: "6443"
-                  # GatewayClass "cilium" bereitstellen. CRDs kommen aus
-                  # modules/gateway.nix — Cilium bringt sie NICHT selbst mit.
+                  # Gateway API AN (2026-08-07). Stellt die GatewayClass "cilium"
+                  # bereit. Setzt kubeProxyReplacement voraus (oben) und die CRDs aus
+                  # modules/gateway.nix (v1.6.1 — die von Cilium 1.20 getestete
+                  # Paarung). Cilium bringt die CRDs NICHT selbst mit.
                   gatewayAPI:
                     enabled: true
                 '';
@@ -191,13 +218,63 @@
         OOMScoreAdjust = -900;
       };
 
+      # ── Host-Firewall BLEIBT AN ───────────────────────────────────────────────
+      # Bewusst anders als nix-config/lab/hosts/azure-k3s (dort `firewall.enable =
+      # false`, weil "die NixOS-Host-Firewall bricht Ciliums Datapath"). Das ist
+      # richtig beobachtet, aber die Diagnose war unvollständig: es ist NICHT die
+      # Filterung in INPUT, sondern AUSSCHLIESSLICH der Reverse-Path-Filter.
+      #
+      # Analyse am 2026-08-06 auf diesem Host (nach dem Erstinstall lief nichts:
+      # coredns/metrics-server/local-path/alle helm-install-Jobs in CrashLoopBackOff,
+      # Symptom `read udp 10.60.0.16->46.38.225.230:53: i/o timeout`):
+      #
+      #   iptables -t mangle -L nixos-fw-rpfilter -n -v
+      #     4011K RETURN  rpfilter validmark
+      #      137K DROP                          <- 44 Pakete/20s, steigend
+      #
+      # Mechanik: `checkReversePath` (Default "loose") legt die Chain
+      # `nixos-fw-rpfilter` in der MANGLE-Tabelle an, aufgerufen aus mangle
+      # PREROUTING, und zwar mit `-m rpfilter --validmark`. `--validmark` lässt den
+      # Reverse-Path-Lookup die fwmark des Pakets BERÜCKSICHTIGEN. Cilium arbeitet
+      # genau damit:
+      #     ip rule:  9: from all fwmark 0x200/0xf00 lookup 2004
+      # Der Lookup landet dadurch in Ciliums Tabelle 2004 statt in `main`, der
+      # Reverse-Path validiert dort nicht → DROP.
+      #
+      # Zwei Konsequenzen, die die Fehlersuche so zäh machten:
+      #   1. mangle PREROUTING läuft VOR INPUT. `trustedInterfaces` (cilium_host,
+      #      lxc+ …) greift also nie — genau das meinte lab mit "egal wie viele
+      #      Interfaces getrustet werden". Die lxc+-Accept-Regel stand auf 0 Paketen.
+      #      Die INPUT-Filterung war nie das Problem.
+      #   2. `logReversePathDrops` ist per Default FALSE → die 137K Drops tauchen in
+      #      keinem Log auf. `journalctl -k | grep refused` war leer.
+      #
+      # Fix: NUR den rpfilter abschalten, die Firewall bleibt vollständig aktiv.
+      # Das ist auch die dokumentierte Voraussetzung für Cilium auf NixOS.
       networking.firewall = {
         enable = true;
+
+        # Siehe Analyse oben. Kein Verzicht auf Anti-Spoofing: der Schutz wird
+        # unten per Kernel-sysctl auf dem externen Interface wiederhergestellt —
+        # dort ohne `--validmark` und damit ohne Cilium-Kollision.
+        checkReversePath = false;
+
         allowedTCPPorts = [
           22
           80
           443
           6443
+          # kubelet-API. Heute unkritisch (apiserver und kubelet liegen auf DEMSELBEN
+          # Host, der Verkehr läuft über `lo` und damit über trustedInterfaces), aber
+          # zwingend, sobald die Control-Plane die Azure-Agents erreichen muss bzw.
+          # deren kubelets diese CP. Ohne den Port scheitern später `kubectl logs`,
+          # `exec` und metrics-server-Scrapes — mit einem Timeout, der wie ein
+          # CNI-Problem aussieht.
+          10250
+          # cilium-health. Cilium läuft auch ohne, meldet dann aber keine
+          # Konnektivitätsinfos zwischen Nodes (Cilium System Requirements). Nur
+          # node-to-node relevant, also ebenfalls Vorbereitung auf den Merge.
+          4240
         ];
         # Cilium-VXLAN zwischen Nodes. Heute Single-Node, aber ohne den Port
         # scheitert der Agent-Beitritt beim Merge still.
@@ -210,6 +287,26 @@
           "lxc+"
         ];
       };
+
+      # Anti-Spoofing-Ersatz für den abgeschalteten iptables-rpfilter (s. o.).
+      # Kernel-rp_filter statt `-m rpfilter --validmark`: der Kernel-Check kennt die
+      # fwmark-Regeln NICHT und kollidiert deshalb nicht mit Ciliums Policy-Routing.
+      #
+      # Nur auf dem EXTERNEN Interface. Cilium schreibt selbst
+      # /etc/sysctl.d/99-zzz-override_cilium.conf mit
+      #   net.ipv4.conf.all.rp_filter        = 0
+      #   net.ipv4.conf.{lxc*,cilium_*}.rp_filter = 0
+      # und lässt die physische NIC absichtlich unangetastet — der Kernel bildet
+      # max(all, interface), also bleibt hier effektiv 2 (loose) auf enp7s0 und 0 auf
+      # allen Cilium-Interfaces. Genau die Aufteilung, die Cilium erwartet.
+      #
+      # 2 = loose (Quelle muss über IRGENDEIN Interface routbar sein), nicht 1 =
+      # strict: strict bricht asymmetrisches Routing und damit ebenfalls Cilium.
+      #
+      # ⚠️ Interfacename hartcodiert. Diese VM hat stabil `enp7s0` (verifiziert
+      # 2026-08-06). Bei Hardware-/Providerwechsel mitziehen, sonst greift der
+      # Spoofing-Schutz still nicht mehr.
+      boot.kernel.sysctl."net.ipv4.conf.enp7s0.rp_filter" = 2;
 
       environment.systemPackages = with pkgs; [
         kubectl

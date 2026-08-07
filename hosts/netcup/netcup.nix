@@ -51,6 +51,9 @@
         # Gateway-CRDs in v1.5.1 mit, die den Cilium-Operator brechen), bevor diese
         # v1.6.1-CRDs greifen.
         self.outputs.modules.nixos.gateway
+        # steinaberfein.de als nix:0-Image. Liegt bei den k3s-Manifesten statt bei
+        # ArgoCD, weil der nix:0-Ref ein Store-Pfad ist — siehe Modulkopf.
+        self.outputs.modules.nixos.steinaberfeinde
       ];
 
       nixpkgs.hostPlatform = "aarch64-linux";

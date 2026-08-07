@@ -23,6 +23,21 @@
     import-tree = {
       url = "github:vic/import-tree";
     };
+    # nix:0-Images (nix-snapshotter). Gleiche Quelle wie nix-config/lab.
+    # KEIN nixpkgs.follows: das Flake baut gegen sein eigenes nixpkgs, ein
+    # Override bricht den Build (gleiche Begründung wie bei hermes/collana im lab).
+    nix-snapshotter = {
+      url = "github:pdtpartners/nix-snapshotter";
+    };
+
+    # Quelle der Website steinaberfein.de. Als Input statt als Container-Image:
+    # damit pinnt flake.lock die Website-Version, und `nix flake update
+    # steinaberfeinde` ist der Update-Weg — kein Image-Digest, keine Registry.
+    steinaberfeinde = {
+      url = "github:mribrgr/steinaberfeinde";
+      flake = false;
+    };
+
     agenix = {
       url = "github:ryantm/agenix";
       inputs.nixpkgs.follows = "nixpkgs";

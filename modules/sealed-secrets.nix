@@ -21,8 +21,57 @@
   # Leaf-Modul: setzt ausschließlich services.k3s.manifests, importiert das
   # k3s-Basismodul NICHT (kein Diamond auf services.k3s.package).
   flake.modules.nixos.sealed-secrets =
-    { lib, config, ... }:
     {
+      lib,
+      config,
+      pkgs,
+      ...
+    }:
+    {
+      # ── Die 11+1 Controller-Keys DEKLARATIV einspielen ────────────────────────
+      # Bis 2026-08-07 war das Handarbeit („agenix -d … | kubectl apply -f -"),
+      # also genau die Art Schritt, die beim nächsten Neuaufbau vergessen wird —
+      # mit der Folge, dass KEIN SealedSecret im Repo mehr entschlüsselbar ist.
+      #
+      # Möglich wird das erst, seit der netcup-Host-Key Recipient der age-Datei ist
+      # (secrets/secrets.nix): der Server entschlüsselt sie zur Aktivierungszeit
+      # selbst, /run/agenix ist tmpfs + root-only.
+      #
+      # Muster wie `collana-secrets` in nix-config/lab/hosts/azure-k3s.
+      age.secrets.sealed-secrets-master-keys.file = ../secrets/sealed-secrets-master-keys.age;
+
+      systemd.services.sealed-secrets-keys = lib.mkIf (config.services.k3s.role == "server") {
+        description = "sealed-secrets Controller-Keys aus agenix einspielen";
+        after = [ "k3s.service" ];
+        requires = [ "k3s.service" ];
+        wantedBy = [ "multi-user.target" ];
+        path = [
+          config.services.k3s.package
+          pkgs.coreutils
+          pkgs.gnugrep
+        ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+        };
+        # Idempotent: `kubectl apply` meldet bei unveränderten Keys "unchanged",
+        # dann bleibt der Controller in Ruhe. Nur wenn wirklich etwas neu ist
+        # (created/configured) wird neu gestartet — sealed-secrets liest seine Keys
+        # NUR beim Start ein, ohne Restart würde ein neuer Key nicht greifen.
+        script = ''
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            k3s kubectl get ns kube-system >/dev/null 2>&1 && break || sleep 2
+          done
+          out=$(k3s kubectl apply -f ${config.age.secrets.sealed-secrets-master-keys.path})
+          echo "$out"
+          if echo "$out" | grep -qE 'created|configured'; then
+            echo "Keys geändert → sealed-secrets neu starten"
+            k3s kubectl -n kube-system rollout restart deploy/sealed-secrets || true
+          fi
+        '';
+      };
+
       services.k3s.manifests = lib.mkIf (config.services.k3s.role == "server") {
         # Version 2.17.7 = exakt die des abgelösten Clusters
         # (charts/root-app/disabled/sealed-secrets.yaml). Bewusst gepinnt: ein

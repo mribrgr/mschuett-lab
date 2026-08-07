@@ -54,11 +54,8 @@
       ];
 
       nixpkgs.hostPlatform = "aarch64-linux";
-      # Literal, nicht aus _network.nix: die gepinnte nix-config-Revision hat
-      # `sites.netcup` noch als String — siehe den Fallback-Block in
-      # modules/k3s.nix. Nach dem Push von base/ kann das wieder auf
-      # `net.sites.netcup.hostName` zeigen.
-      networking.hostName = "netcup";
+      # Aus dem Fleet-Adressplan, nicht doppelt geführt.
+      networking.hostName = (import (inputs.nix-config + "/base/_network.nix")).sites.netcup.hostName;
       networking.domain = "powersrv.de";
 
       # systemd-boot statt des alten GRUB-mit-efiInstallAsRemovable: efivars sind

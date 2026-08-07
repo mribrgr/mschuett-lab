@@ -29,28 +29,7 @@
       # Über den Input, nicht relativ: dieses Repo liegt außerhalb von nix-config.
       net = import (inputs.nix-config + "/base/_network.nix");
 
-      # ⚠️ TEMPORÄRER FALLBACK (2026-08-06). Der GEPINNTE nix-config-Input hat
-      # `sites.netcup` noch als String ("10.32.0.0/16"); der Ausbau zum Attrset
-      # (fqdn/publicIp/hostName) liegt lokal und ist NICHT gepusht. Genau daran ist
-      # der erste Install-Versuch gescheitert — nach dem Wipe, beim Bauen der
-      # Closure auf dem Ziel:
-      #   error: expected a set but found a string: "10.32.0.0/16"
-      # (nixos-anywhere nutzt den dirty Worktree von mschuett-lab, holt nix-config
-      # aber aus git.)
-      #
-      # Sobald base/ gepusht und `nix flake update nix-config` gelaufen ist, greift
-      # automatisch wieder der Adressplan und dieser Block kann ersatzlos weg.
-      # `cluster.*` unten kommt weiterhin aus _network.nix — das existiert in der
-      # gepinnten Revision bereits.
-      nc =
-        if builtins.isAttrs (net.sites.netcup or null) then
-          net.sites.netcup
-        else
-          {
-            fqdn = "v2202505270128345138.powersrv.de";
-            publicIp = "152.53.15.24";
-            hostName = "netcup";
-          };
+      nc = net.sites.netcup;
 
       isServer = config.services.k3s.role == "server";
     in

@@ -19,10 +19,16 @@ kind: HTTPRoute
 metadata:
   name: {{ .Chart.Name }}
 spec:
+  # group/kind/weight stehen BEWUSST explizit da, obwohl es Defaults sind.
+  # Der API-Server ergänzt sie sonst selbst, und ArgoCD meldet den Unterschied
+  # zwischen Manifest und Live-Objekt dauerhaft als OutOfSync (sichtbar geworden
+  # bei notjustadevelopercom, das mit ServerSideApply synct). Explizit = der
+  # Diff ist sauber und das Manifest beschreibt exakt, was im Cluster steht.
   parentRefs:
-    - name: main
-      namespace: default
+    - group: gateway.networking.k8s.io
       kind: Gateway
+      name: main
+      namespace: default
   hostnames:
     - steinaberfein.de
     - www.steinaberfein.de
@@ -32,5 +38,8 @@ spec:
             type: PathPrefix
             value: /
       backendRefs:
-        - name: {{ .Chart.Name }}
+        - group: ""
+          kind: Service
+          name: {{ .Chart.Name }}
           port: {{ .Values.service.port }}
+          weight: 1

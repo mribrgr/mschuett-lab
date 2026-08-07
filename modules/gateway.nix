@@ -32,13 +32,7 @@
     }:
     let
       net = import (inputs.nix-config + "/base/_network.nix");
-      # Gleicher temporärer Fallback wie in modules/k3s.nix — der gepinnte
-      # nix-config-Input hat sites.netcup noch als String. Entfällt mit dem Push.
-      nc =
-        if builtins.isAttrs (net.sites.netcup or null) then
-          net.sites.netcup
-        else
-          { publicIp = "152.53.15.24"; };
+      nc = net.sites.netcup;
     in
     {
       services.k3s.manifests = lib.mkIf (config.services.k3s.role == "server") {

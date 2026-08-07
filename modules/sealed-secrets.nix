@@ -55,9 +55,9 @@
           RemainAfterExit = true;
         };
         # Idempotent: `kubectl apply` meldet bei unveränderten Keys "unchanged",
-        # dann bleibt der Controller in Ruhe. Nur wenn wirklich etwas neu ist
-        # (created/configured) wird neu gestartet — sealed-secrets liest seine Keys
-        # NUR beim Start ein, ohne Restart würde ein neuer Key nicht greifen.
+        # dann bleibt der Controller in Ruhe (verifiziert 2026-08-07: 12×
+        # unchanged, 0 Restarts). Nur bei einem NEUEN Key wird neu gestartet —
+        # sealed-secrets liest seine Keys NUR beim Start ein.
         script = ''
           set -euo pipefail
           for _ in $(seq 1 60); do
@@ -65,7 +65,14 @@
           done
           out=$(k3s kubectl apply -f ${config.age.secrets.sealed-secrets-master-keys.path})
           echo "$out"
-          if echo "$out" | grep -qE 'created|configured'; then
+          # Nur bei 'created' neu starten, NICHT bei 'configured'. Grund: ein
+          # Restart bei jedem Boot wäre sinnlos, und genau das passierte beim
+          # ersten Lauf (2026-08-07) — die exportierte YAML trug noch
+          # resourceVersion/uid/managedFields, wodurch `apply` jedes Mal
+          # "configured" meldete. Die age-Datei ist inzwischen um diese Felder
+          # bereinigt; 'created' greift dann nur noch auf einem frischen Cluster,
+          # und genau dort ist der Restart nötig.
+          if echo "$out" | grep -q 'created'; then
             echo "Keys geändert → sealed-secrets neu starten"
             k3s kubectl -n kube-system rollout restart deploy/sealed-secrets || true
           fi

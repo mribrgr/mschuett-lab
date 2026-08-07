@@ -184,11 +184,11 @@
     "nix-config": {
       "flake": false,
       "locked": {
-        "lastModified": 1785765906,
-        "narHash": "sha256-5qebdTSRqtTa141MAwNdBggUKibtRqCZIhbuvW0BIAU=",
+        "lastModified": 1786135731,
+        "narHash": "sha256-H/rzgWS/16bqzCYifovU9oxPvBJu+fp8eDHGJd+huWE=",
         "ref": "refactor/multiworld-restructure",
-        "rev": "955374125f7c7bae377022287faac7c4c56d4ab3",
-        "revCount": 42,
+        "rev": "ec1cf5b412c3362cd8cc515198dc37d0a780b5e5",
+        "revCount": 43,
         "type": "git",
         "url": "https://github.com/mribrgr/nix-config"
       },

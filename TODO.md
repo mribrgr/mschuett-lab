@@ -327,6 +327,39 @@ ArgoCD zieht aus git, nicht aus dem Worktree.
 Ohne diesen Schritt kein velero → **kein Restore**. Danach: sealed-secrets-Keys
 einspielen (Runbook Schritt 3), dann `velero restore`.
 
+## 0j. Longhorn + NAS-Backup-Target — VORBEREITET, nicht aktiv
+
+Stand 2026-08-07. `modules/longhorn.nix` ist fertig, aber BEWUSST nicht in
+`hosts/netcup/netcup.nix` importiert (verifiziert: nicht in services.k3s.manifests,
+`services.openiscsi.enable = false`). Longhorn 1.12.0 = neueste stabile Release;
+1.12.1 gibt es bisher nur als rc.
+
+**NAS-Seite ist schon fertig.** `nix-config/homelab/modules/features/nas-backup-target.nix`
+exportiert `/srv/backup/longhorn` per NFSv4, nur auf dem Mesh-Interface, und der
+nas-Host importiert das Modul bereits. Da ist nichts mehr zu bauen.
+
+Drei Blocker, alle im Modulkopf ausführlich dokumentiert:
+
+1. **NixOS-Pfade — longhorn#2166, seit 2021 OFFEN.** Longhorn `nsenter`t in den
+   Host-Namespace und erwartet `iscsiadm`/`mount` an FHS-Pfaden. Es gibt bis heute
+   keine native Unterstützung. Der von nixpkgs dokumentierte Weg
+   (`pkgs/applications/networking/cluster/k3s/docs/examples/STORAGE.md`) schiebt
+   allen Longhorn-Pods per **Kyverno-ClusterPolicy** ein PATH-Env unter — also ein
+   zusätzlicher Admission-Controller. Alternativen: NixOS-gepatchte Community-Images,
+   oder bei local-path bleiben und per nodeSelector pinnen.
+   **Das ist eine Architekturentscheidung, keine Fleißarbeit.**
+2. **Backup-Target hängt am netbird-Mesh.** `base/_network.nix` hat `mesh.cidr`
+   noch als PLATZHALTER (`verified = false`). Ohne Mesh keine Route netcup → NAS,
+   also kein Backup-Ziel. Die `backupTarget`-Zeile im Modul ist deshalb
+   auskommentiert.
+3. **Migration der Bestandsdaten.** postgres 88M, paperless 85M+48M, n8n 26M,
+   grocy, signal-api liegen auf local-path. Ein StorageClass-Wechsel migriert
+   NICHTS automatisch — pro Volume velero-Restore in eine neue PVC oder manuell
+   kopieren.
+
+⚠️ Auf einem Single-Node bringt Longhorn **keinen** Replikationsgewinn. Sinnvoll
+wird es erst mit dem Merge (Fleet-Design §5) — vorher nur Overhead.
+
 ## 1. bricklink-scraping: weg vom HTML-Scraping, hin zur BrickStore-Lösung
 
 **Status:** aus dem Erst-Deployment ausgeschlossen (`charts/root-app/disabled/`).

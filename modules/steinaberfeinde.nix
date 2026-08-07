@@ -107,9 +107,13 @@
                     name = "steinaberfeinde";
                     # nix:0 — wird vom nix-snapshotter aufgelöst, kein Registry-Pull.
                     image = img.image;
-                    # Never: das Image kommt aus dem Store, nicht aus einer Registry.
-                    # Bei Always würde der kubelet vergeblich zu ziehen versuchen.
-                    imagePullPolicy = "Never";
+                    # IfNotPresent, NICHT Never. Erst dachte ich, "Never" sei
+                    # richtig, weil das Image ja aus dem Store kommt — falsch:
+                    # der nix-snapshotter klinkt sich in den PULL ein und löst den
+                    # nix:0-Ref dabei aus dem Store auf. Mit "Never" lehnt der
+                    # kubelet vorher ab, weil containerd das Image noch nicht
+                    # kennt → ErrImageNeverPull (2026-08-07 genau so gesehen).
+                    imagePullPolicy = "IfNotPresent";
                     ports = [ { containerPort = 80; } ];
                   }
                 ];

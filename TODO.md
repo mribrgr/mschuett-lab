@@ -203,9 +203,36 @@ portabel (git-Input, maschinenunabhängig).
 - [ ] **Backup-Ziel NAS.** Bleibt vorerst velero → Azure Blob (funktioniert,
       verifiziert). Ziel ist das NAS, das dafür noch nicht eingerichtet ist. Wenn
       velero im neuen Setup nicht sauber läuft, ist das vorerst akzeptiert.
-- [ ] **nix:0 überall.** Kein gVisor auf diesem Node → keine runsc-Einschränkung
-      (im lab musste `signal-bridge` deshalb auf dockerTools zurück). `--snapshotter=nix`
-      ist gesetzt; Images können auf `nix-snapshotter.buildImage` umgestellt werden.
+- ✅/[ ] **nix:0 — Realitätscheck (2026-08-07).** `steinaberfein.de` läuft als
+      erstes nix:0-Image (`modules/steinaberfeinde.nix`), verifiziert:
+      `image=nix:0/nix/store/…-nix-image-steinaberfeinde.tar`, Seite liefert 200
+      mit gültigem TLS und korrekten MIME-Typen.
+
+      „nix:0 überall" ist aber NICHT erreichbar, und das war vorher zu optimistisch
+      formuliert. nix:0 setzt `nix-snapshotter.buildImage` voraus — das geht nur bei
+      **selbst gebauten** Images. cilium, cert-manager, sealed-secrets, velero,
+      postgres, redis, paperless, n8n, grocy, signal-api, coredns sind Fremd-Images
+      und bleiben dauerhaft OCI. Realistische Kandidaten: genau drei —
+      steinaberfein.de (erledigt), notjustadevelopercom, bl-sync.
+
+      Drei Erkenntnisse, die Zeit gekostet haben:
+      1. **nix-snapshotter veröffentlicht Pakete nur für x86_64-linux.**
+         `builtins.attrNames f.packages` → `["x86_64-linux"]`. Auf aarch64 ist
+         `inputs.nix-snapshotter.packages.<system>` schlicht leer. Das lab merkt das
+         nicht, weil es x86_64 ist. Lösung: der **Overlay** baut aus dem Source und
+         liefert `buildImage` auch auf aarch64 — angewandt auf eine LOKALE
+         pkgs-Instanz, damit das Diamond-Problem aus dem lab nicht auftritt.
+      2. **`imagePullPolicy: Never` ist falsch.** Der nix-snapshotter klinkt sich in
+         den PULL ein; mit `Never` lehnt der kubelet vorher ab → `ErrImageNeverPull`.
+         Richtig ist `IfNotPresent`.
+      3. **nix:0 schließt ArgoCD aus.** Der Ref ist ein Store-Pfad, den nur nix zur
+         Eval-Zeit kennt — ein Chart in git kann ihn nicht ausdrücken. Solche
+         Workloads laufen deshalb über `services.k3s.manifests`. Bewusste Ausnahme
+         von der Regel „GitOps für App-Level" (0b), begrenzt auf nix:0-Workloads.
+
+      - [ ] notjustadevelopercom und bl-sync ebenfalls auf nix:0 — beide brauchen
+            dafür denselben Repo-als-Input-Trick wie steinaberfeinde.
+      - [ ] Falls gVisor kommt: nix:0 läuft NICHT unter runsc (0e).
 
 ## 0e. gVisor kommt später — was JETZT zu beachten ist
 

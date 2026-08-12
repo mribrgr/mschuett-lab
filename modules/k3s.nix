@@ -107,6 +107,37 @@
             # neuen Service-CIDR. In keinem Chart (mschuett-lab,
             # not-just-a-developer.com, bricklink) ist 10.42/10.43 hartcodiert —
             # am 2026-08-05 geprüft.
+            # ── Blast-Radius bei NotReady ──────────────────────────────────────
+            # Ohne diese Flags gilt der k8s-Default von 300 s: wird der Node
+            # NotReady (schon ein kurzer k3s-Neustart genügt), löscht der
+            # taint-eviction-controller nach 5 min ALLE Pods. Genau das ist dem
+            # Lab am 2026-07-25 passiert (Komplettausfall nach einem
+            # CP-Blip) — netcup hatte bis 2026-08-10 dieselbe Exposition.
+            #
+            # Container überleben einen k3s-Restart ohnehin (der containerd-shim
+            # bleibt), daher entkoppelt eine lange Toleranz die Pod-Lebensdauer von
+            # transienten Blips. Auf einem SINGLE-NODE ist Eviction ohnehin sinnlos:
+            # es gibt keinen zweiten Node, auf den etwas ausweichen könnte.
+            #
+            # ⚠️ Das ist der cluster-weite DEFAULT, kein Verbot. Schnelles Failover
+            # einzelner Workloads macht man NICHT hierüber, sondern per Pod:
+            #
+            #   tolerations:
+            #     - key: node.kubernetes.io/not-ready
+            #       operator: Exists
+            #       effect: NoExecute
+            #       tolerationSeconds: 60
+            #     - key: node.kubernetes.io/unreachable
+            #       operator: Exists
+            #       effect: NoExecute
+            #       tolerationSeconds: 60
+            #
+            # Erst SINNVOLL, wenn es Worker-Nodes gibt (Fleet-Design §5). Solange
+            # netcup allein läuft, würde ein kurzer tolerationSeconds nur Pods
+            # löschen, die nirgends hin können. Siehe TODO.md 0k.
+            "--kube-apiserver-arg=default-not-ready-toleration-seconds=3600"
+            "--kube-apiserver-arg=default-unreachable-toleration-seconds=3600"
+
             "--cluster-cidr=${net.cluster.podCidr}"
             "--service-cidr=${net.cluster.serviceCidr}"
             "--cluster-dns=${net.cluster.clusterDns}"

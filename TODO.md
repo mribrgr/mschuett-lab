@@ -568,3 +568,74 @@ Auf `main` existiert `base/` nicht. Nach dem Merge umstellen auf
 Secret, Wallet-Adresse. Läuft seit 2026-03-27 nicht mehr, Namespace `mining`
 existiert nicht. Rest liegt nur noch in 8 Alt-Commits der History (Wallet-Adresse
 ist ein öffentlicher Identifier, Pool-Passwort war `worker1` — kein Handlungsbedarf).
+
+## 0k. Node-Ausfall & PV-Verfügbarkeit — Tolerationen gesetzt, Failover offen
+
+**Ausgangsfrage (2026-08-10):** einen Non-Control-Plane-Node verlieren und die PVs
+(z. B. der Agents) mit <5 min Downtime auf einem anderen Node wiederhaben.
+
+### Was gemacht ist
+`modules/k3s.nix` setzt jetzt `default-not-ready-toleration-seconds=3600` und
+`default-unreachable-toleration-seconds=3600` — identisch zu `lab/modules/k3s.nix`.
+
+Das ist **kein** Failover-Feature, sondern Schadensbegrenzung: ohne die Flags gilt
+der k8s-Default von 300 s, und ein kurzer k3s-Neustart hätte nach 5 min alle Pods
+gelöscht. Genau dieser Ausfall traf das Lab am 2026-07-25; netcup hatte bis
+2026-08-10 dieselbe Exposition. Auf einem Single-Node ist Eviction sowieso
+sinnlos — es gibt keinen zweiten Node.
+
+### Was NICHT gemacht ist (bewusst)
+Kurze `tolerationSeconds` pro Workload. Wirkungslos bis schädlich, solange netcup
+allein läuft: Pods würden gelöscht, ohne dass sie irgendwo hin können. Beim Merge
+nachziehen — dann pro stateful Workload:
+
+```yaml
+tolerations:
+  - key: node.kubernetes.io/not-ready
+    operator: Exists
+    effect: NoExecute
+    tolerationSeconds: 60
+  - key: node.kubernetes.io/unreachable
+    operator: Exists
+    effect: NoExecute
+    tolerationSeconds: 60
+```
+
+⚠️ `--kube-apiserver-arg` gilt nur auf dem **Server**. Nach dem Merge ist netcup
+Control Plane, also gilt DIESE Datei clusterweit; die Flags in `lab/modules/k3s.nix`
+verlieren ihre Wirkung, sobald azure-k3s zum Agent wird. Wer dort etwas erwartet,
+sucht an der falschen Stelle.
+
+### Recherche-Ergebnisse zur Storage-Frage (für später)
+1. **Longhorn kann NICHT netcup ↔ Azure replizieren.** Die Replikation ist
+   synchron; Longhorn-Docs nennen >1 ms Latenz „impractical" und verweisen
+   ausdrücklich auf den Backupstore statt auf Cross-Region-Replicas. Longhorn ist
+   also nur INNERHALB einer Location sinnvoll, nie über beide Provider.
+2. **NAS als zentrales Storage-Backend: verworfen.** Macht eine
+   Consumer-Leitung zur harten Abhängigkeit produktiver Workloads, und
+   NFS-hard-mounts hängen bei Linkverlust (Prozesse in uninterruptible sleep)
+   statt nur langsam zu werden. Fleet-Design §5 hält das schon fest:
+   „NAS (kein Node!) nur NFS :2049" — bleibt Backup-Target.
+3. **Die Agents haben heute gar keine PVs.** `lab/modules/openclaw.nix` und
+   `hermes.nix` enthalten keine einzige PVC. Stateful im Lab sind nur
+   `prometheus-data` (local-path), signal-bridge und tenants (je
+   `storageClassName: manual`, also statisch). Für den Agent-Fall ist damit
+   ausschließlich die Toleranz-/Scheduling-Frage relevant, nicht Storage.
+4. **Playground verbietet PVCs bereits per Policy.**
+   `lab/modules/playground.nix:337` (ValidatingAdmissionPolicy) erlaubt nur
+   `emptyDir/configMap/downwardAPI/projected/secret`; spot-workers sind zusätzlich
+   `agent-lab/spot=true:NoSchedule` getaintet. Nicht aufweichen — kein State auf
+   preemptible Kapazität ist die richtige Antwort, nicht die Umgehung.
+
+### Wenn HA-Storage wirklich gebraucht wird
+Kein Provider-übergreifender Storage-Layer. Stattdessen:
+- **Postgres:** CloudNativePG (v1.30.0, 2026-06-29) — asynchrone Streaming-
+  Replikation, WAN-tolerant, lokale PVs, Failover in Sekunden.
+- **Longhorn:** nur bei 2–3 netcup-VMs in derselben Location (sub-ms). Der Kauf
+  brächte zusätzlich etcd-Quorum — heute ist die Control Plane Single-Node, ein
+  netcup-Ausfall reißt den Cluster unabhängig von Storage mit. Laut Mauritius
+  2026-08-10 **vorerst nicht geplant**, evtl. ferne Zukunft.
+- **Stateful in Azure:** Azure Disk CSI, natives Detach/Reattach in der Region.
+- Vorher messen: Latenz zwischen netcup-VMs in derselben Location. Longhorns
+  Tauglichkeit hängt allein daran. netcup → Azure ist nicht messbar (NSG lässt
+  nur 22 inbound), netcup → NAS erst nach dem Mesh (siehe 0j Blocker 2).

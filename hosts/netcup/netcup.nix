@@ -54,6 +54,14 @@
         # steinaberfein.de als nix:0-Image. Liegt bei den k3s-Manifesten statt bei
         # ArgoCD, weil der nix:0-Ref ein Store-Pfad ist — siehe Modulkopf.
         self.outputs.modules.nixos.steinaberfeinde
+
+        # ── Persönliche Dienste: chat.mauritiusberger.de + idm.mauritiusberger.de ──
+        # Namespace `chat`, beide Workloads als nix:0-Images. Auch Leaf-Module: nur
+        # services.k3s.manifests (openwebui zusätzlich einen agenix→k8s-Secret-oneshot).
+        # Design: nix-config/docs/superpowers/specs/2026-08-26-openwebui-kanidm-netcup-design.md
+        self.outputs.modules.nixos.chat-namespace
+        self.outputs.modules.nixos.kanidm
+        self.outputs.modules.nixos.openwebui
       ];
 
       nixpkgs.hostPlatform = "aarch64-linux";
@@ -89,6 +97,37 @@
         "console=tty0"
         "console=ttyAMA0,115200"
       ];
+
+      # ── nix-Builds dürfen etcd nicht umbringen ────────────────────────────────
+      # Root-Cause 2026-07-25 auf azure-k3s: ein nix-Build schrieb ~800 MB in 7 min
+      # auf DIESELBE Platte wie etcd → fsync-Latenz ~1 s → k3s-Crash → Node NotReady
+      # → taint-eviction löschte ALLE Pods. Hier ist die Co-Location noch enger: EINE
+      # vda für /nix UND etcd. k3s selbst ist über IOWeight/IODeviceLatencyTargetSec
+      # in modules/k3s.nix schon priorisiert — das hier ist die andere Seite davon.
+      #
+      # IOSchedulingClass wird NICHT gesetzt: NixOS setzt es via nix.daemonIOSchedClass,
+      # und auf dem `none`-Scheduler wirkt es ohnehin nicht. Die deterministische
+      # Absicherung ist IOWriteBandwidthMax (blk-throttle).
+      #
+      # MemoryMax ist Absicht: `open-webui` ist unfree, also nicht im Binary-Cache, und
+      # muss hier gebaut werden. Ein zu hungriger Build soll SCHEITERN statt kubelet/etcd
+      # in den kernel-OOM zu ziehen.
+      systemd.services.nix-daemon.serviceConfig = {
+        IOWeight = 10;
+        CPUWeight = 20;
+        Nice = 15;
+        IOWriteBandwidthMax = "/ 60M";
+        IOReadBandwidthMax = "/ 120M";
+        MemoryHigh = "3G";
+        MemoryMax = "4G";
+      };
+      systemd.services.nix-gc.serviceConfig = {
+        IOWeight = 10;
+        CPUWeight = 20;
+        Nice = 19;
+        IOWriteBandwidthMax = "/ 40M";
+        IOReadBandwidthMax = "/ 100M";
+      };
 
       # 7,7 GiB ohne Swap ist für mongod + postgres + paperless knapp. zram
       # kostet keinen Plattenplatz und federt Spitzen ab, statt den OOM-Killer

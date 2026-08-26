@@ -74,4 +74,20 @@ in
   # heißt jetzt mschuett-lab und ist PUBLIC — ArgoCD zieht ohne Credentials.
   # Nur aufbewahrt, bis das Erst-Deployment verifiziert ist (TODO.md Punkt 7).
   "argocd-legacy-repo-key.age".publicKeys = all;
+
+  # ── chat.mauritiusberger.de: OpenWebUI + Kanidm (Namespace `chat`) ────────────
+  # Alle drei werden auf dem Host entschlüsselt und von modules/openwebui.nix in das
+  # k8s-Secret `chat/open-webui-secrets` gerendert (Muster: broker-secrets in
+  # nix-config/lab/modules/llm-proxy.nix). Die LLM-Keys selbst liegen in
+  # nix-config/base/secrets/ — netcup ist dort seit 2026-08-26 Recipient.
+  #
+  # openwebui-oidc-secret: von kanidm GENERIERT und einmal per
+  # `kanidm system oauth2 show-basic-secret open-webui` ausgelesen, nicht von uns gesetzt.
+  # Ein gesetztes Secret bräuchte kanidm_1_11.withSecretProvisioning — einen gepatchten
+  # Rust-Build ohne Binary-Cache auf dem Prod-Node. Bei kanidm-Neuaufbau neu auslesen.
+  "openwebui-oidc-secret.age".publicKeys = all ++ [ netcup ];
+  # Session-Signing-Key von OpenWebUI. Rotation invalidiert alle Sessions.
+  "openwebui-secret-key.age".publicKeys = all ++ [ netcup ];
+  # API-Key von mberger für den Modell-Gating-Sidecar (Workspace-Modell-Freigabe).
+  "openwebui-admin-token.age".publicKeys = all ++ [ netcup ];
 }

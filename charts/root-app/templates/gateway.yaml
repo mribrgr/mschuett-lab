@@ -125,3 +125,32 @@ spec:
       allowedRoutes:
         namespaces:
           from: All
+
+    # ── chat./idm.mauritiusberger.de (OpenWebUI + Kanidm, Namespace `chat`) ────
+    # Je eigenes Secret wie bei den übrigen Hosts: dadurch sind Renewals und
+    # LE-Rate-Limits pro Host getrennt. Die Certificates legt der
+    # cert-manager-gateway-shim aus der cluster-issuer-Annotation oben an.
+    # `from: All` ist hier NICHT optional — die HTTPRoutes liegen in Namespace
+    # `chat`, das Gateway in `default`.
+    - name: https-chat
+      protocol: HTTPS
+      port: 443
+      hostname: chat.mauritiusberger.de
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: chat-mauritiusberger-de-tls
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: https-idm
+      protocol: HTTPS
+      port: 443
+      hostname: idm.mauritiusberger.de
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: idm-mauritiusberger-de-tls
+      allowedRoutes:
+        namespaces:
+          from: All

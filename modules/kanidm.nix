@@ -1,6 +1,7 @@
 { inputs, self, ... }:
 {
-  # Kanidm als IdP für das OpenWebUI-SSO. Ein Pod, drei Container aus EINEM nix:0-Image:
+  # Kanidm als IdP für das OpenWebUI-SSO. Ein Pod aus EINEM nix:0-Image: ein initContainer
+  # (tls-init, erzeugt das Loopback-Self-Signed) und drei Container:
   #
   #   kanidmd    127.0.0.1:8443, TLS-pflichtig (kanidm hat keinen Plaintext-Modus)
   #   nginx      :8080 → https://127.0.0.1:8443, proxy_ssl_verify off (nur Loopback)
@@ -15,6 +16,11 @@
   #   • TLSRoute-Passthrough: gleiches Renewal-Problem.
   # Ein 10-Jahre-Self-Signed auf Loopback hat das Problem nicht; das ÖFFENTLICHE
   # Zertifikat bleibt beim cert-manager am Gateway, wie bei allen anderen Hosts.
+  #
+  # ⚠️ Die HTTPRoute unten braucht den Gateway-LISTENER aus
+  # `charts/root-app/templates/gateway.yaml` — der kommt über ArgoCD aus dem GEPUSHTEN Repo.
+  # Ohne ihn melden die Routen `NoMatchingParent`, es gibt kein Zertifikat, und die
+  # :80-Redirect-Route schickt Browser in ein HTTPS mit Connection-Reset.
   #
   # ⚠️ `domain`/`origin` sind nach dem ersten Start praktisch nicht mehr änderbar — sie
   # hängen an allen ausgestellten Credentials. Einmal richtig: idm.mauritiusberger.de.
@@ -236,32 +242,50 @@
         };
       };
 
-      # Portiert aus nixos/modules/services/security/kanidm.nix (`postStartScript`).
-      # Läuft bei JEDEM Pod-Start und ist damit idempotent; kanidm-provision räumt aus
-      # der Config entfernte Entities über seine Tracking-Gruppe selbst weg.
+      # ⚠️ Dieser Container darf bei einem Fehler NICHT sterben. Kein Container im Pod hat
+      # eine readinessProbe, Pod-Ready heißt also „alle Container laufen": ein
+      # CrashLoopBackOff hier nimmt dem `kanidm`-Service seinen einzigen Endpoint und legt
+      # den ganzen IdP (und damit jeden open-webui-Login) still, obwohl kanidmd und nginx
+      # gesund sind. Fehler also laut ins Log, aber am Leben bleiben.
+      #
+      # Portiert aus nixos/modules/services/security/kanidm.nix (`postStartScript`); läuft
+      # bei jedem Pod-Start und ist idempotent — kanidm-provision räumt aus der Config
+      # entfernte Entities über seine Tracking-Gruppe selbst weg.
       provisionScript = ''
-        set -euo pipefail
-        for i in $(seq 1 60); do
-          if curl -sS --insecure --max-time 2 https://127.0.0.1:8443 >/dev/null 2>&1; then break; fi
-          if [ "$i" = 60 ]; then echo "kanidm kam in 120s nicht hoch" >&2; exit 1; fi
-          sleep 2
-        done
+        provision() {
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            if curl -sS --insecure --max-time 2 https://127.0.0.1:8443 >/dev/null 2>&1; then break; fi
+            if [ "$i" = 60 ]; then echo "kanidm kam in 120s nicht hoch" >&2; return 1; fi
+            sleep 2
+          done
 
-        # Frisches idm_admin-Passwort pro Lauf, nur transient benutzt. Ein GEWÄHLTES
-        # Passwort (--from-environment) gäbe es nur mit dem Secret-Provisioning-Patch.
-        recover_out=$(kanidmd scripting recover-account -c /config/server.toml idm_admin)
-        pw=$(printf '%s' "$recover_out" | jq -r .output)
-        if [ -z "$pw" ] || [ "$pw" = "null" ]; then
-          echo "idm_admin-Passwort nicht parsebar: $recover_out" >&2
-          exit 1
+          # ⚠️ Das idm_admin-Passwort existiert nur in diesem Container und wird bei JEDEM
+          # Pod-Start neu gewürfelt. Wer es notiert, verliert es beim nächsten Restart, und
+          # ein auf idm_admin enrolltes MFA wird mitgelöscht. Ist ausgerechnet das
+          # Provisioning kaputt, gibt es kein Admin-Credential für Reset-Tokens — dann hilft
+          # nur ein Pod-Restart (neues Passwort) und ein Blick ins Log.
+          recover_out=$(kanidmd scripting recover-account -c /config/server.toml idm_admin)
+          pw=$(printf '%s' "$recover_out" | jq -r .output)
+          if [ -z "$pw" ] || [ "$pw" = "null" ]; then
+            # BEWUSST ohne $recover_out: dessen JSON enthält das frische Passwort, und
+            # Container-Logs kann jeder mit kubectl-Zugriff lesen.
+            echo "idm_admin-Passwort nicht parsebar (Ausgabe unterdrueckt)" >&2
+            return 1
+          fi
+
+          KANIDM_PROVISION_IDM_ADMIN_TOKEN="$pw" kanidm-provision \
+            --accept-invalid-certs \
+            --url https://127.0.0.1:8443 \
+            --state /config/provision-state.json
+        }
+
+        if provision; then
+          echo "provisioning ok"
+        else
+          echo "PROVISIONING FEHLGESCHLAGEN — kanidmd laeuft weiter, der Zustand ist aber" >&2
+          echo "NICHT deckungsgleich mit der Config. Log oben pruefen, dann Pod neu starten." >&2
         fi
-
-        KANIDM_PROVISION_IDM_ADMIN_TOKEN="$pw" kanidm-provision \
-          --accept-invalid-certs \
-          --url https://127.0.0.1:8443 \
-          --state /config/provision-state.json
-
-        echo "provisioning ok"
         exec sleep infinity
       '';
     in
@@ -310,13 +334,21 @@
               template = {
                 metadata = {
                   labels.app = "kanidm";
-                  # kanidm-provision setzt das OAuth2-Basic-Secret beim POD-START. Ändert
-                  # sich die age-Datei, muss der Pod rollen, sonst behält kanidm den alten
-                  # Wert, während open-webui schon den neuen benutzt — SSO wäre kaputt und
-                  # nichts würde es melden. Der Store-Pfad der age-Datei ist der Trigger.
-                  annotations."checksum/oidc-secret" = builtins.hashString "sha256" "${
-                    ../secrets/openwebui-oidc-secret.age
-                  }";
+                  # kanidm-provision setzt das OAuth2-Basic-Secret beim POD-START, kanidmd
+                  # liest server.toml beim Start. Ohne diese zwei Annotationen bliebe der Pod
+                  # nach einer Änderung stehen: neue Person, neues scopeMap, neues Secret —
+                  # ConfigMap aktualisiert, aber nichts davon wirkt, und nichts meldet es.
+                  # `hashFile` hasht den INHALT der age-Datei, nicht ihren Store-Pfad (der
+                  # hängt am ganzen nix-config-Baum und triggerte bei jeder fremden Änderung).
+                  annotations = {
+                    "checksum/oidc-secret" = builtins.hashFile "sha256" ../secrets/openwebui-oidc-secret.age;
+                    "checksum/config" = builtins.hashString "sha256" (
+                      builtins.toJSON {
+                        inherit serverToml nginxConf;
+                        state = provisionState;
+                      }
+                    );
+                  };
                 };
                 spec = {
                   securityContext = {
@@ -416,9 +448,11 @@
                       resources = {
                         requests = {
                           cpu = "50m";
-                          memory = "192Mi";
+                          # Gemessen 2026-08-26: 30Mi im Betrieb. Requests knapp halten,
+                          # damit die Limit-Summe auf dem 7,7-GiB-Node nicht gegen 100% läuft.
+                          memory = "96Mi";
                         };
-                        limits.memory = "512Mi";
+                        limits.memory = "384Mi";
                       };
                     }
                     {
@@ -451,9 +485,9 @@
                       resources = {
                         requests = {
                           cpu = "10m";
-                          memory = "32Mi";
+                          memory = "16Mi"; # gemessen: 2Mi
                         };
-                        limits.memory = "128Mi";
+                        limits.memory = "64Mi";
                       };
                     }
                     {
@@ -496,9 +530,9 @@
                       resources = {
                         requests = {
                           cpu = "10m";
-                          memory = "64Mi";
+                          memory = "32Mi"; # gemessen: 0Mi, schläft nach dem Provisioning
                         };
-                        limits.memory = "256Mi";
+                        limits.memory = "192Mi";
                       };
                     }
                   ];

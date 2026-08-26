@@ -81,10 +81,11 @@ in
   # nix-config/lab/modules/llm-proxy.nix). Die LLM-Keys selbst liegen in
   # nix-config/base/secrets/ — netcup ist dort seit 2026-08-26 Recipient.
   #
-  # openwebui-oidc-secret: von kanidm GENERIERT und einmal per
-  # `kanidm system oauth2 show-basic-secret open-webui` ausgelesen, nicht von uns gesetzt.
-  # Ein gesetztes Secret bräuchte kanidm_1_11.withSecretProvisioning — einen gepatchten
-  # Rust-Build ohne Binary-Cache auf dem Prod-Node. Bei kanidm-Neuaufbau neu auslesen.
+  # openwebui-oidc-secret: WIR setzen es. kanidm-provision schreibt den Wert per
+  # `basicSecretFile` in kanidm (dafür läuft kanidm als `withSecretProvisioning`-Variante,
+  # off-host gebaut), und dieselbe Datei speist OAUTH_CLIENT_SECRET in open-webui.
+  # Rotation = age-Datei neu verschlüsseln + Deploy; kein Auslese-Schritt, und ein
+  # kanidm-Neuaufbau übernimmt den Wert von selbst.
   "openwebui-oidc-secret.age".publicKeys = all ++ [ netcup ];
   # Session-Signing-Key von OpenWebUI. Rotation invalidiert alle Sessions.
   "openwebui-secret-key.age".publicKeys = all ++ [ netcup ];

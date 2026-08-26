@@ -120,18 +120,34 @@ nicht mehr. Seitdem gilt: **aarch64-linux-Closures baut die Builder-VM des MacBo
 (`nix-config/mac/modules/linux-builder.nix`), und nur die fertige Closure wird kopiert:
 
 ```bash
-# in der VM bauen (Flake ohne .git rsyncen; der Submodul-Gitlink zeigt sonst ins Leere)
-rsync -a --delete --exclude .git ./ builder-vm:deploy/mschuett-lab/
-ssh builder-vm 'nix build --no-link --print-out-paths \
+# 0) Builder-VM hochfahren (läuft NICHT dauerhaft, belegt sonst 12 GB RAM)
+nix run ~/projects/nix-config/mac#linux-builder -- start
+
+# 1) nur base/ aus nix-config bereitstellen: ein path:-Input auf das ganze Repo
+#    kopiert 1,7 GB pro Eval, und jede Doku-Änderung verschiebt den Closure-Hash
+mkdir -p /tmp/nc-slim && rsync -a --delete ~/projects/nix-config/base/ /tmp/nc-slim/base/
+rsync -a --delete -e ssh /tmp/nc-slim/ linux-builder:deploy/nc-slim/
+
+# 2) Flake in die VM (OHNE .git — der Submodul-Gitlink zeigt dort ins Leere)
+rsync -a --delete --exclude .git ./ linux-builder:deploy/mschuett-lab/
+NEW=$(ssh linux-builder 'nix build --no-link --print-out-paths \
   "path:/home/builder/deploy/mschuett-lab#nixosConfigurations.netcup.config.system.build.toplevel" \
-  --override-input nix-config path:/home/builder/deploy/nc-slim'
-# Closure rüber und aktivieren
-nix copy --no-check-sigs --from ssh-ng://builder-vm --to ssh-ng://root@netcup "$NEW"
+  --override-input nix-config path:/home/builder/deploy/nc-slim --max-jobs 4 --cores 8')
+
+# 3) Closure rüber, Diff ansehen, aktivieren
+nix copy --no-check-sigs --from ssh-ng://linux-builder --to ssh-ng://root@netcup "$NEW"
 ssh netcup "nix run nixpkgs#nvd -- diff /run/current-system $NEW"
 ssh netcup "nix-env -p /nix/var/nix/profiles/system --set $NEW && $NEW/bin/switch-to-configuration switch"
+
+# 4) VM wieder runterfahren
+nix run ~/projects/nix-config/mac#linux-builder -- stop
 ```
-`nc-slim` ist ein Verzeichnis, das NUR `base/` aus nix-config enthält — ein `path:`-Input auf
-das ganze Repo kopiert 1,7 GB pro Eval.
+Der Host-Alias `linux-builder` (Port 31022, Key in `~/.local/share/linux-builder/keys`) kommt
+aus `nix-config/mac/modules/linux-builder.nix` und existiert nach einem `darwin-rebuild switch`.
+
+⚠️ `nix build --store ssh-ng://…` **ohne** lokalen eval-store macht tausende SSH-Round-Trips
+und läuft ins Timeout; `--eval-store auto` dazu scheitert als nicht-`trusted-user` an nicht
+substituierbaren Derivations. Deshalb der Weg über rsync + Build IN der VM.
 
 ### Ein bewusst interaktiver Vorgang
 Kanidm kann Personen-Credentials nicht provisionieren. Einmal pro Nutzer, im Pod:

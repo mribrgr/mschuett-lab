@@ -7,6 +7,11 @@
   # auf DIESEM Node. Deshalb MUSS die nix-daemon-Drosselung aus hosts/netcup/netcup.nix
   # aktiv sein (Root-Cause 2026-07-25: nix-Build riss etcd mit).
   #
+  # ⚠️ Die HTTPRoute unten ist ohne den passenden Gateway-LISTENER wirkungslos, und der
+  # liegt in `charts/root-app/templates/gateway.yaml` — ArgoCD, also nur im GEPUSHTEN Repo.
+  # Fehlermodus ist gemein: die :80-Redirect-Route funktioniert weiter und schickt Browser
+  # auf ein HTTPS, das mit Connection-Reset endet. Neuer Hostname ⇒ immer auch push.
+  #
   # Die Unfree-Erlaubnis wird bewusst NICHT am Host gesetzt, sondern auf einer eigenen
   # pkgs-Instanz: so bleibt der Rest der Config unangetastet und es ist an genau einer
   # Stelle sichtbar, welches Paket die Ausnahme braucht.
@@ -24,11 +29,14 @@
             name = "open-webui-root";
             paths = [
               pkgsOwui.open-webui
-              # sqlite für den velero-Pre-Hook (konsistenter DB-Snapshot),
-              # curl/jq für den Modell-Gating-Sidecar (kommt, sobald der API-Key existiert).
+              # sqlite für den velero-Pre-Hook (konsistenter DB-Snapshot); curl/jq/grep/sed
+              # für den Modell-Gating-Sidecar und für lesende Diagnose im Pod (ohne grep
+              # scheitert jedes `… | grep …` im Container mit "command not found").
               pkgsOwui.sqlite
               pkgsOwui.curl
               pkgsOwui.jq
+              pkgsOwui.gnugrep
+              pkgsOwui.gnused
               pkgsOwui.coreutils
               pkgsOwui.bashInteractive
               pkgsOwui.cacert
@@ -76,6 +84,20 @@
       webuiOrigin = "https://chat.mauritiusberger.de";
       idmOrigin = "https://idm.mauritiusberger.de";
 
+      # Die vier Quellen des k8s-Secrets. `hashFile` hasht den INHALT — nicht den
+      # Store-Pfad: `"${inputs.nix-config + "/base/secrets/…"}"` löst zu
+      # /nix/store/<Hash des GANZEN nix-config-Baums>-source/… auf, womit jede
+      # unbeteiligte Änderung in nix-config den Pod neu gestartet hätte.
+      secretFiles = [
+        ../secrets/openwebui-oidc-secret.age
+        ../secrets/openwebui-secret-key.age
+        (inputs.nix-config + "/base/secrets/openrouter-develappers.age")
+        (inputs.nix-config + "/base/secrets/collana-auth-token.age")
+      ];
+      secretsChecksum = builtins.hashString "sha256" (
+        builtins.concatStringsSep ":" (map (f: builtins.hashFile "sha256" f) secretFiles)
+      );
+
       env = {
         # ── Basis ────────────────────────────────────────────────────────────────
         WEBUI_URL = webuiOrigin;
@@ -122,9 +144,16 @@
         ENABLE_SIGNUP = "False";
         # Nur mit verifizierten Mails sicher — hier bewusst aus.
         OAUTH_MERGE_ACCOUNTS_BY_EMAIL = "False";
-        # An lassen: Notfallweg in die Instanz, falls kanidm hängt. Es existieren keine
-        # lokalen Konten, das Formular ist also faktisch leer.
-        ENABLE_LOGIN_FORM = "True";
+        # ⚠️ MUSS "False" bleiben. Die frühere Begründung („Notfallweg, das Formular ist
+        # ohne lokale Konten ja leer") war genau falsch herum: solange NULL Nutzer in der DB
+        # stehen, ist `/auths/signup` offen — open-webui lässt den ERSTEN Nutzer bewusst
+        # durch (`has_users == false` überspringt den ENABLE_SIGNUP-Check) und macht ihn zum
+        # **Admin**. Auf einer öffentlich erreichbaren Instanz ist das ein
+        # Admin-Selbstbedienungsladen; `ENABLE_SIGNUP=False` und `DEFAULT_USER_ROLE=pending`
+        # greifen für diesen einen Nutzer NICHT. Am 2026-08-26 im Audit live nachgewiesen.
+        # Notfallzugang, wenn kanidm hängt: diese Zeile temporär auf "True" + Deploy, nicht
+        # dauerhaft offen lassen.
+        ENABLE_LOGIN_FORM = "False";
 
         # ── Rollen/Gruppen aus dem eigenen Claim ────────────────────────────────
         ENABLE_OAUTH_ROLE_MANAGEMENT = "True";
@@ -141,10 +170,10 @@
         # ist zwar schon "pending" (= gesperrt), aber daran soll nicht die
         # Zugriffskontrolle hängen.
         DEFAULT_USER_ROLE = "pending";
-        # Nötig für den Modell-Gating-Sidecar: ohne das antwortet jeder Bearer-API-Key
-        # mit 403 (auth.enable_api_keys, Default False). Der Plural ist der richtige
-        # Name — ENABLE_API_KEY (Singular) existiert nicht.
-        ENABLE_API_KEYS = "True";
+        # Bleibt AUS, bis der Modell-Gating-Sidecar existiert: die Option öffnet den
+        # Bearer-API-Key-Pfad (auth.enable_api_keys, Default False) und hat ohne Sidecar
+        # keinen Nutzer. Der Plural ist der richtige Name — ENABLE_API_KEY existiert nicht.
+        ENABLE_API_KEYS = "False";
         # MUSS False bleiben: True gibt jedem Zugriff auf jedes Modell und macht das
         # Modell-Gating wirkungslos.
         BYPASS_MODEL_ACCESS_CONTROL = "False";
@@ -159,6 +188,10 @@
         # Einsatz ein Modell von HuggingFace — Laufzeit-Download und ~1 GB RAM neben
         # mongodb/postgres auf 7,7 GiB. "openai" verhindert den lokalen Pfad.
         RAG_EMBEDDING_ENGINE = "openai";
+        # Zeigt sonst auf den ERSTEN Eintrag von OPENAI_API_BASE_URLS (openrouter), und der
+        # hat keinen /embeddings-Endpunkt. Heute folgenlos, weil Datei-Upload aus ist —
+        # wer RAG scharf schaltet, muss hier collana eintragen.
+        RAG_OPENAI_API_BASE_URL = "https://llm.collana.com/v1";
         ENABLE_RAG_HYBRID_SEARCH = "False";
         ENABLE_WEB_SEARCH = "False";
         USER_PERMISSIONS_CHAT_FILE_UPLOAD = "False";
@@ -192,11 +225,16 @@
         path = [
           config.services.k3s.package
           pkgs.coreutils
+          pkgs.gnugrep
         ];
         serviceConfig = {
           Type = "oneshot";
           RemainAfterExit = true;
           PrivateTmp = true;
+          # Ohne Restart bleibt ein Fehlschlag endgültig: braucht k3s beim Kaltstart länger
+          # als die Warteschleife unten, würde das Secret NIE gerendert und niemand merkt es.
+          Restart = "on-failure";
+          RestartSec = 15;
         };
         # OHNE das läuft der oneshot nach einem Secret-Wechsel NIE wieder: er ist
         # RemainAfterExit, seine Unit-Definition referenziert nur PFADE, und agenix
@@ -204,17 +242,18 @@
         # k8s-Secret mit dem ALTEN Wert (am 2026-08-26 genau so passiert).
         # Die .age-Dateien sind Store-Pfade: neuer Inhalt ⇒ neuer Pfad ⇒ Unit-Änderung
         # ⇒ systemd startet den oneshot beim Switch neu.
-        restartTriggers = [
-          config.age.secrets.openwebui-oidc-secret.file
-          config.age.secrets.openwebui-secret-key.file
-          config.age.secrets.openrouter-develappers.file
-          config.age.secrets.collana-auth-token.file
-        ];
+        restartTriggers = [ secretsChecksum ];
         script = ''
           set -euo pipefail
+          ready=""
           for _ in $(seq 1 60); do
-            k3s kubectl get ns chat >/dev/null 2>&1 && break || sleep 2
+            if k3s kubectl get ns chat >/dev/null 2>&1; then ready=yes; break; fi
+            sleep 2
           done
+          if [ -z "$ready" ]; then
+            echo "Namespace chat kam in 120s nicht — Unit scheitert absichtlich (Restart=on-failure)" >&2
+            exit 1
+          fi
 
           tmp=$(mktemp -d)
           trap 'rm -rf "$tmp"' EXIT
@@ -231,13 +270,20 @@
             --dry-run=client -o yaml | k3s kubectl apply -f -)
           echo "$out"
 
-          # OpenWebUI liest die Werte per envFrom.secretRef, also NUR beim Start. Ändert
-          # sich das Secret (Key-Rotation, oder das aus kanidm ausgelesene OAuth2-Secret),
-          # muss der Pod neu starten — sonst läuft er still mit dem alten Wert weiter.
-          # Nur bei 'configured'/'created', nicht bei 'unchanged': sonst würde jeder Boot
-          # den Pod neu starten. Gleiches Muster wie modules/sealed-secrets.nix.
+          # Beide Deployments lesen das Secret NUR beim Containerstart (envFrom bzw. der
+          # Volume-Mount des provision-Containers). Nur bei 'configured'/'created', nicht bei
+          # 'unchanged' — sonst würde jeder Boot beide Pods neu starten. Muster wie
+          # modules/sealed-secrets.nix.
+          #
+          # ⚠️ REIHENFOLGE: kanidm ZUERST und mit Warten. kanidm-provision SETZT das
+          # Basic-Secret beim Pod-Start; startet open-webui vorher mit dem neuen Wert,
+          # während kanidm noch den alten kennt, ist SSO kaputt — und zwar lautlos, weil
+          # kanidms eigene Annotation danach schon zum neuen Stand passt und nie wieder rollt.
           if ! echo "$out" | grep -q 'unchanged'; then
-            echo "Secret geändert → open-webui neu starten"
+            echo "Secret geändert → kanidm zuerst (setzt das Basic-Secret), dann open-webui"
+            k3s kubectl -n chat rollout restart deploy/kanidm || true
+            k3s kubectl -n chat rollout status deploy/kanidm --timeout=180s || \
+              echo "WARNUNG: kanidm-Rollout nicht bestätigt — open-webui wird trotzdem neu gestartet" >&2
             k3s kubectl -n chat rollout restart deploy/open-webui || true
           fi
         '';
@@ -280,8 +326,6 @@
               template = {
                 metadata = {
                   labels.app = "open-webui";
-                  # velero-Hook: konsistente Kopie der sqlite-DB, bevor fs-backup läuft.
-                  # Ohne das kopiert kopia eine LAUFENDE sqlite-Datei.
                   annotations = {
                     # `envFrom` liest ConfigMap und Secret NUR beim Containerstart. Ohne
                     # diese zwei Annotationen läuft der Pod nach einer Env- oder
@@ -289,14 +333,9 @@
                     # Beides ist zur Eval-Zeit bekannt: der Env-Satz als Hash, die Secrets
                     # über ihre Store-Pfade (neuer Inhalt ⇒ neuer Pfad).
                     "checksum/env" = builtins.hashString "sha256" (builtins.toJSON env);
-                    "checksum/secrets" = builtins.hashString "sha256" (
-                      builtins.concatStringsSep ":" [
-                        "${../secrets/openwebui-oidc-secret.age}"
-                        "${../secrets/openwebui-secret-key.age}"
-                        "${inputs.nix-config + "/base/secrets/openrouter-develappers.age"}"
-                        "${inputs.nix-config + "/base/secrets/collana-auth-token.age"}"
-                      ]
-                    );
+                    "checksum/secrets" = secretsChecksum;
+                    # velero-Hook: konsistente Kopie der sqlite-DB, bevor fs-backup läuft.
+                    # Ohne das kopiert kopia eine LAUFENDE sqlite-Datei.
                     "pre.hook.backup.velero.io/container" = "open-webui";
                     "pre.hook.backup.velero.io/command" =
                       ''["/bin/sqlite3","/data/webui.db",".backup /data/webui-backup.db"]'';
@@ -349,12 +388,16 @@
                         periodSeconds = 10;
                         failureThreshold = 12;
                       };
+                      # Am 2026-08-26 gemessen: 613Mi im LEERLAUF (kein Nutzer, kein Chat).
+                      # Ein Request unter dem Ruhebedarf macht den Pod zum ersten
+                      # Eviction-Kandidaten, und 1Gi Limit lässt für PDF-Export oder
+                      # Modell-Listing keine Luft.
                       resources = {
                         requests = {
                           cpu = "100m";
-                          memory = "512Mi";
+                          memory = "768Mi";
                         };
-                        limits.memory = "1Gi";
+                        limits.memory = "1536Mi";
                       };
                     }
                   ];

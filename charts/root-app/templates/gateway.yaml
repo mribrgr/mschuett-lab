@@ -132,7 +132,30 @@ spec:
     # cert-manager-gateway-shim aus der cluster-issuer-Annotation oben an.
     # `from: All` ist hier NICHT optional — die HTTPRoutes liegen in Namespace
     # `chat`, das Gateway in `default`.
+    # ── Umzug des Chats: chat.mauritiusberger.de → chat.steinaberfein.de ──────
+    # BEIDE Listener stehen hier, absichtlich. Der Listener kommt über ArgoCD aus dem
+    # GEPUSHTEN Repo, die HTTPRoutes dagegen aus dem Flake — die zwei Quellen gehen also
+    # zu verschiedenen Zeitpunkten live. Gäbe es nur den neuen Namen, wäre der Chat
+    # zwischen Flake-Deploy und Push nicht erreichbar.
+    #
+    # Phase 2 (nach verifiziertem Login auf dem neuen Namen): `https-chat-alt` und den
+    # alten Hostnamen aus modules/openwebui.nix + modules/kanidm.nix entfernen.
+    #
+    # Beim Umzug wandern DREI Stellen mit, sonst bricht der Login: der Listener hier,
+    # `webuiOrigin` in modules/openwebui.nix (WEBUI_URL + OPENID_REDIRECT_URI) und
+    # `originUrl`/`originLanding` des OAuth2-Clients in modules/kanidm.nix.
     - name: https-chat
+      protocol: HTTPS
+      port: 443
+      hostname: chat.steinaberfein.de
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: chat-steinaberfein-de-tls
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: https-chat-alt
       protocol: HTTPS
       port: 443
       hostname: chat.mauritiusberger.de

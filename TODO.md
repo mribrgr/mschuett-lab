@@ -431,6 +431,29 @@ offizielle BrickLink-Datenquellen statt HTML-Scraping.
 - Damit entfallen Proxy-Rotation, User-Agent-Spielchen und Backoff-Logik
   komplett — und mit ihnen `proxies.py`, `proxy_manager.py`, `networking.py`.
 
+### Stand 2026-08-27: die Recherche ist gemacht
+
+Die Fragen unten sind beantwortet — Ergebnis in `docs/bricklink-mcp.md`, Umsetzung
+in `modules/bricklink-mcp.nix` + `pkgs/bricklink-mcp/` (MCP-Server für Max' eigenen
+Store, aus `chat.mauritiusberger.de` bedienbar).
+
+- **Welche Endpunkte BrickStore nutzt:** gelesen. BrickStore benutzt die Store API
+  gar nicht, sondern Web-Endpunkte mit Session-Token (`invExcelFinal.asp`,
+  `orderExcelFinal.asp`, `catalogDownload.asp`, …) plus BrickStores Affiliate-Key
+  für den Batch-Preis-Guide. Details und Kadenz im Doku-Abschnitt „Was BrickStore
+  selbst macht".
+- **Deckt die offizielle Quelle die Fragestellung?** Für den EIGENEN Store: ja,
+  vollständig (Bestellungen inkl. Adresse, Inventar, Feedback, Statuswechsel).
+  Für FREMD-Store-Inventare: **nein** — die API gibt keine anderen Stores her.
+  Der Ersatz ist der Preis-Guide (`GET /items/{type}/{no}/price`, mit
+  `price_detail` je Angebot und `country_code`/`region`-Filter). Wenn
+  Wettbewerbsdaten das Ziel waren, ist das das neue Datenmodell — Item-zentriert
+  statt Store-zentriert, und es passt in 5000 Requests/Tag nur mit Cache.
+- **Credentials als agenix:** erledigt, `secrets/bricklink-{api,web-token,mcp-bearer}.age`.
+- **MongoDB/RabbitMQ:** vom MCP nicht gebraucht. Er hält seinen Zustand in SQLite
+  auf einem 3Gi-PVC. Damit ist der Weiterbetrieb des alten Scraper-Stacks eine
+  eigene, unabhängige Entscheidung.
+
 ### Vor der Umsetzung zu klären
 
 - [ ] Bei BrickStore nachlesen, **welche** Endpunkte/Dateien konkret genutzt

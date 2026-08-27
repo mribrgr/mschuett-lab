@@ -62,6 +62,25 @@
         self.outputs.modules.nixos.chat-namespace
         self.outputs.modules.nixos.kanidm
         self.outputs.modules.nixos.openwebui
+        # Claude-Max-Abo als OpenAI-Endpoint für OpenWebUI. Kein Ingress, zusätzlich per
+        # CiliumNetworkPolicy nur für den open-webui-Pod erreichbar — der Port ist das
+        # Abo-Credential.
+        self.outputs.modules.nixos.meridian
+
+        # BrickLink-MCP: mschuett verwaltet seinen Store über den Chat statt über
+        # BrickLinks Web-UI. Kein Ingress, nur clusterintern für open-webui (CNP +
+        # Bearer-Token). Braucht zwei Credentials von Hand: das API-Token-Paar für
+        # die netcup-IP und den 30-Tage-Web-Token für den Katalog-Export.
+        # Details im Modulkopf und in docs/bricklink-mcp.md.
+        self.outputs.modules.nixos.bricklink-mcp
+
+        # ── Zwischenlager des velero-Mirrors aufs NAS ──────────────────────────
+        # Garage-Pod in Namespace `backup-store` plus der Nur-Forwarding-User
+        # `nas-pull`, über den das NAS den Store abholt. Die zugehörige BSL
+        # `staging`, der zweite Schedule und das AWS-Plugin von velero liegen im
+        # Chart-Repo (velero ist dort Chart-Abhängigkeit) — Begründung im Modulkopf.
+        # Design: nix-config/docs/superpowers/specs/2026-08-26-velero-nas-mirror-design.md
+        self.outputs.modules.nixos.backup-store
       ];
 
       nixpkgs.hostPlatform = "aarch64-linux";

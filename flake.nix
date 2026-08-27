@@ -38,6 +38,14 @@
       flake = false;
     };
 
+    # Meridian: lokaler Anthropic- UND OpenAI-kompatibler Endpoint, der ein
+    # Claude-Max-Abo über das Claude Code SDK bridged (OAuth, kein API-Key).
+    # KEIN nixpkgs.follows: das Flake baut mit bun2nix gegen sein eigenes nixpkgs,
+    # ein Override bricht den Build (gleiche Begründung wie bei hermes/collana im lab).
+    meridian = {
+      url = "github:rynfar/meridian";
+    };
+
     agenix = {
       url = "github:ryantm/agenix";
       inputs.nixpkgs.follows = "nixpkgs";

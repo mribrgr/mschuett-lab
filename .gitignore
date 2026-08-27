@@ -30,3 +30,7 @@ id_ed25519*
 result
 result-*
 .direnv/
+
+# Python-Bytecode des bricklink-mcp
+__pycache__/
+*.pyc

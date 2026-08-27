@@ -1,7 +1,7 @@
 { inputs, self, ... }:
 {
   # Kanidm als IdP für das OpenWebUI-SSO. Ein Pod aus EINEM nix:0-Image: ein initContainer
-  # (tls-init, erzeugt das Loopback-Self-Signed) und drei Container:
+  # (db-reindex + tls-init) und drei Container:
   #
   #   kanidmd    127.0.0.1:8443, TLS-pflichtig (kanidm hat keinen Plaintext-Modus)
   #   nginx      :8080 → https://127.0.0.1:8443, proxy_ssl_verify off (nur Loopback)
@@ -96,7 +96,10 @@
       img = self.packages.${pkgs.stdenv.hostPlatform.system}.kanidm-image;
 
       domain = "idm.mauritiusberger.de";
-      chatOrigin = "https://chat.mauritiusberger.de";
+      # Phase 1 des Umzugs: BEIDE Namen sind gültige Redirect-Ziele. kanidm-provision
+      # akzeptiert für originUrl eine Liste. In Phase 2 fällt der alte Eintrag weg.
+      chatOrigin = "https://chat.steinaberfein.de";
+      chatOriginOld = "https://chat.mauritiusberger.de";
 
       serverToml = ''
         version = "2"
@@ -176,14 +179,16 @@
         mberger = [ "openwebui-admins" ];
         mschuett = [
           "openwebui-users"
-          "openwebui-deepseek"
+          # Eingeschränkte Modell-Auswahl. Welche Modelle das sind, steht in
+          # modules/openwebui.nix (modelGrants) — hier steht nur, WER dazugehört.
+          "openwebui-limited"
         ];
       };
 
       groupNames = [
         "openwebui-admins"
         "openwebui-users"
-        "openwebui-deepseek"
+        "openwebui-limited"
       ];
 
       membersOf = group: lib.attrNames (lib.filterAttrs (_: groups: lib.elem group groups) personGroups);
@@ -204,8 +209,11 @@
         };
         systems.oauth2.open-webui = {
           displayName = "Open WebUI";
-          originUrl = "${chatOrigin}/oauth/oidc/callback";
-          originLanding = "${chatOrigin}/";
+          originUrl = [
+            "${chatOrigin}/oauth/oidc/callback"
+            "${chatOriginOld}/oauth/oidc/callback"
+          ];
+          originLanding = "${chatOriginOld}/";
           # `name` statt `spn` im preferred_username-Claim → die OpenWebUI-Konten heißen
           # "mberger", nicht "mberger@idm.mauritiusberger.de".
           preferShortUsername = true;
@@ -236,7 +244,7 @@
             valuesByGroup = {
               openwebui-admins = [ "openwebui-admins" ];
               openwebui-users = [ "openwebui-users" ];
-              openwebui-deepseek = [ "openwebui-deepseek" ];
+              openwebui-limited = [ "openwebui-limited" ];
             };
           };
         };
@@ -389,6 +397,43 @@
                     }
                   ];
                   initContainers = [
+                    {
+                      # kanidm meldet beim Start „WARNING: index OAuth2ConsentScopeMap
+                      # Equality was not found. YOU MUST REINDEX YOUR DATABASE" — mit der
+                      # Folge, dass /ui/apps mit 500 (ResourceLimit, „filter (search) is
+                      # fully unindexed") antwortet: die Apps-Seite des IdP war damit tot,
+                      # während der OIDC-Flow selbst lief. Am 2026-08-26 so beobachtet.
+                      #
+                      # `database reindex` ist ausdrücklich OFFLINE, deshalb als
+                      # initContainer: hier läuft kanidmd noch nicht, der DB-Lock ist frei.
+                      # Idempotent und auf einer kleinen DB in Sekunden durch — damit heilt
+                      # sich ein fehlender Index bei jedem Pod-Start selbst, statt einen
+                      # manuellen Eingriff zu brauchen.
+                      name = "db-reindex";
+                      image = img.image;
+                      imagePullPolicy = "IfNotPresent";
+                      command = [
+                        "/bin/kanidmd"
+                        "database"
+                        "reindex"
+                        "-c"
+                        "/config/server.toml"
+                      ];
+                      volumeMounts = [
+                        {
+                          name = "data";
+                          mountPath = "/data";
+                        }
+                        {
+                          name = "config";
+                          mountPath = "/config";
+                        }
+                        {
+                          name = "tmp";
+                          mountPath = "/tmp";
+                        }
+                      ];
+                    }
                     {
                       name = "tls-init";
                       image = img.image;

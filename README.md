@@ -96,6 +96,19 @@ kubectl get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | 
 helm template charts/root-app/ | kubectl apply -f -
 ```
 
+## BrickLink-MCP (Namespace `chat`)
+
+MCP-Server, mit dem mschuett seinen BrickLink-Store aus dem Chat verwaltet statt
+über BrickLinks Web-UI: Bestellungen, Nachrichten, Bewertungen, Inventar,
+Katalog/Preis-Guide lesend — schreibend nur `→ PACKED` und `PACKED → SHIPPED`
+(optional mit Sendungsnummer), Feedback und die Versandmail.
+
+`modules/bricklink-mcp.nix` + `pkgs/bricklink-mcp/`. Kein Ingress: OpenWebUI
+verbindet clusterintern per Streamable HTTP, davor eine CiliumNetworkPolicy und
+ein Bearer-Token. Zwei Credentials sind Handarbeit (API-Token pro IP,
+Web-Token mit 30 Tagen Laufzeit) — Recherche, Design und Runbook:
+`docs/bricklink-mcp.md`.
+
 ## chat.mauritiusberger.de — OpenWebUI + Kanidm-SSO (Namespace `chat`)
 
 Deklarativ in `modules/{chat-namespace,kanidm,openwebui}.nix`, ausgeliefert als
@@ -163,6 +176,27 @@ kubectl -n chat exec -it deploy/kanidm -c provision -- /bin/bash
 ```
 ⚠️ `--accept-invalid-certs`, **nicht** `-C /tls/chain.pem`: das Loopback-Zertifikat ist sein
 eigener Issuer, rustls lehnt es als CA mit `CaUsedAsEndEntity` ab.
+
+### Zwei Dinge, die man nicht anfassen darf
+- **`ENABLE_LOGIN_FORM` bleibt `"False"`.** Mit 0 Nutzern in der DB lässt open-webui den
+  ERSTEN Signup bewusst durch und macht ihn zum Admin — `ENABLE_SIGNUP=False` greift für
+  diesen einen Fall nicht. Auf einer öffentlichen Instanz ist ein aktives Login-Formular
+  damit ein offener Admin-Claim (am 2026-08-26 live nachgewiesen, Signup liefert jetzt 403).
+  Notfallzugang bei kanidm-Ausfall: temporär auf `"True"` + Deploy, danach zurück.
+- **`ENV = "prod"`** bleibt gesetzt, sonst sind `/docs` und `/openapi.json` öffentlich.
+
+### Kleine Änderungen: nativ auf netcup bauen
+Sind die teuren Artefakte (open-webui-Image, gepatchtes kanidm) schon im Store des Nodes,
+lohnt der VM-Umweg nicht — dann reicht:
+```bash
+rsync -a --delete --exclude .git ./ netcup:/root/deploy/mschuett-lab/
+rsync -a --delete ~/projects/nix-config/base/ netcup:/root/deploy/nc-slim/base/
+ssh netcup 'cd /root/deploy && nix build --no-link --print-out-paths \
+  "path:/root/deploy/mschuett-lab#nixosConfigurations.netcup.config.system.build.toplevel" \
+  --override-input nix-config path:/root/deploy/nc-slim --max-jobs 1 --cores 3'
+```
+Nur für Manifest-/Env-Änderungen. Sobald ein Paket neu gebaut werden muss, gilt wieder:
+**in der VM bauen** (siehe oben).
 
 ### Was nach einem open-webui-Versions-Bump zu prüfen ist
 Die Env-Var-Namen sind nicht stabil (in 0.11 z.B. `OAUTH_GROUPS_CLAIM` statt

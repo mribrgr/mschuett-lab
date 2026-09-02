@@ -61,6 +61,54 @@ Discovery läuft über
 `https://gmailmcp.googleapis.com/.well-known/oauth-protected-resource/mcp/v1`;
 sie nennt `https://accounts.google.com/` als Autorisierungsserver.
 
+## Der open-webui-Patch (upstream #20697)
+
+Open WebUI 0.11.0 kann einen per `TOOL_SERVER_CONNECTIONS` deklarierten MCP-Server mit
+`oauth_2.1_static` **nicht** beim Start registrieren. `initialize_runtime_config`
+(`main.py:586`) ruft `resolve_oauth_client_info`, und das entschlüsselt bedingungslos
+`info.oauth_client_info` — einen Blob, den ausschließlich `register_client` in die DB
+schreibt. Mit `ENABLE_PERSISTENT_CONFIG=False` liest `Config.get` nur die Env, der Blob kann
+also per Definition nie existieren. `decrypt_data("")` wirft dann `InvalidToken`, deren
+`str()` leer ist — daher die nichtssagende Logzeile:
+
+```
+ERROR | open_webui.main:initialize_runtime_config:596 - Error adding OAuth client for MCP tool server gmail:
+```
+
+Der statische Overlay aus `oauth_client_id`/`oauth_client_secret` steht zwei Zeilen darunter
+und wird nie erreicht. Folge: der Client fehlt im Manager, und
+`/oauth/clients/mcp:gmail/authorize` antwortet **404** — die Zustimmung ist nicht anklickbar.
+
+`modules/openwebui.nix` patcht deshalb zwei Einzeiler in `backend/open_webui/utils/oauth.py`:
+
+1. `resolve_oauth_client_info`: entschlüsselt nur noch, wenn ein Blob da ist.
+2. `recover_static_oauth_client_metadata`: ergänzt `redirect_uris`, das im gepinnten
+   MCP-SDK Pflicht ist (im SDK-`main` inzwischen optional — nicht verwechseln). Ohne das
+   Feld scheitert der Konstruktor mit
+   `1 validation error for OAuthClientInformationFull: redirect_uris Field required`.
+
+Danach fehlt dem Objekt nur noch `server_metadata`; damit scheitert
+`_preflight_authorization_url`, und der Authorize-Endpunkt ruft upstreams **eigenen**
+Reparaturpfad `register_client` → `get_oauth_client_info_with_static_credentials` mit voller
+Discovery. Der Patch liefert also nur den Anker, den upstream danach selbst korrekt aufbaut.
+
+Beide Ersetzungen sind bewusst einzeilig: Python ist whitespace-sensitiv, und eine
+mehrzeilige Ersetzung in einem nix-`''`-String verlöre durch das Abziehen der gemeinsamen
+Einrückung ihre Indentation. `--replace-fail` bricht beim nächsten open-webui-Bump laut —
+dann prüfen, ob #20697 zu ist, und den Patch ersatzlos entfernen.
+
+Der Patch hängt an `overridePythonAttrs`, betrifft also **nur** das Python-Paket. Die
+Frontend-Derivation (`open-webui-frontend`, `buildNpmPackage`) hängt am unveränderten `src`
+und wird nicht neu gebaut — der 3,9-GB-Vite-Build bleibt aus, der Deploy geht nativ auf
+netcup (verifiziert 2026-09-02: 37 Derivations, keine davon `open-webui-frontend`,
+`npm-deps` oder `pyodide`).
+
+### Nicht erschrecken: „Initialized 0 tool server(s)"
+
+`get_tool_servers_data` verarbeitet nur `type == "openapi"` (`utils/tools.py:1460`).
+MCP-Server laufen zur Request-Zeit über `connect_mcp_server`. Die Null stand also auch schon
+da, als BrickLink allein und funktionierend eingetragen war.
+
 ## Pro-Nutzer-Zustimmung
 
 Der Bearer-Token ist hier **nicht** geteilt: jeder Open WebUI-Nutzer autorisiert einmal im

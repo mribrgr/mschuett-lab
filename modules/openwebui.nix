@@ -32,6 +32,65 @@
           # der Client warnt beim Verbinden nur über die Versionsdifferenz.
           openWebui = pkgsOwui.open-webui.overridePythonAttrs (old: {
             dependencies = (old.dependencies or [ ]) ++ [ pkgsOwui.python3Packages.qdrant-client ];
+            # Upstream-Bug (open-webui#20697): ein per TOOL_SERVER_CONNECTIONS deklarierter
+            # MCP-Server mit `auth_type = "oauth_2.1_static"` lässt sich beim Start NICHT
+            # registrieren. `initialize_runtime_config` ruft `resolve_oauth_client_info`,
+            # und das entschlüsselt bedingungslos `info.oauth_client_info` — einen Blob, den
+            # nur `register_client` in die DB schreibt. Mit ENABLE_PERSISTENT_CONFIG=False
+            # liest `Config.get` ausschließlich die Env, der Blob kann also per Definition
+            # nie existieren. `decrypt_data("")` wirft dann `InvalidToken` (deren str() ist
+            # leer — daher die nichtssagende Logzeile "Error adding OAuth client for MCP
+            # tool server gmail:"), und der statische Overlay aus oauth_client_id/-secret
+            # zwei Zeilen darunter wird nie erreicht. Ergebnis: der Client fehlt im Manager,
+            # und /oauth/clients/mcp:gmail/authorize antwortet 404 — die Zustimmung ist
+            # nicht anklickbar.
+            #
+            # Der Patch macht das Entschlüsseln bedingt. Fehlt der Blob, bleibt `data` leer,
+            # der Overlay setzt client_id/client_secret, `recover_static_oauth_client_metadata`
+            # holt scope+resource aus der Protected-Resource-Metadata. `redirect_uris` darf im
+            # MCP-SDK-Modell fehlen ("may be absent or empty"), das Objekt ist also gültig.
+            # Es hat nur noch keine server_metadata — womit `_preflight_authorization_url`
+            # fehlschlägt und der Authorize-Endpunkt upstreams EIGENEN Reparaturpfad
+            # (`register_client` → `get_oauth_client_info_with_static_credentials` mit voller
+            # Discovery) auslöst. Wir stellen also nur den Client bereit, den upstream danach
+            # selbst korrekt aufbaut.
+            #
+            # --replace-fail: bricht beim nächsten open-webui-Bump laut, statt still einen
+            # bereits gefixten Upstream zu doppeln. Dann prüfen, ob #20697 zu ist, und den
+            # Patch ersatzlos entfernen.
+            #
+            # Betrifft NUR das Python-Paket. Die Frontend-Derivation (`open-webui-frontend`,
+            # buildNpmPackage) hängt am unveränderten `src` und wird dadurch nicht neu
+            # gebaut — der 3,9-GB-Vite-Build bleibt also aus.
+            #
+            # Zweiter Patch, gleiche Ursache: `OAuthClientInformationFull` verlangt im
+            # gepinnten MCP-SDK `redirect_uris` (im SDK-`main` ist es inzwischen optional —
+            # nicht verwechseln). Ohne Blob fehlt das Feld, und der Konstruktor scheitert mit
+            # "1 validation error for OAuthClientInformationFull: redirect_uris Field required".
+            # `recover_static_oauth_client_metadata` ist async und hat `Config`, also wird die
+            # URL dort ergänzt — exakt so, wie sie upstream in
+            # `get_oauth_client_info_with_static_credentials` gebaut wird:
+            # {webui.url}/oauth/clients/mcp:{id}/callback. Genau diese URI ist im
+            # Google-OAuth-Client hinterlegt.
+            #
+            # Danach fehlt dem Objekt nur noch `server_metadata`; damit scheitert
+            # `_preflight_authorization_url`, und der Authorize-Endpunkt ruft upstreams
+            # `register_client` — der mit voller Discovery das richtige Objekt baut. Genau
+            # dieser Reparaturpfad ist das Ziel: wir liefern nur den Anker, den er braucht.
+            #
+            # Bewusst EINZEILIG ersetzt: Python ist whitespace-sensitiv, und eine
+            # mehrzeilige Ersetzung in einem nix-''''-String verlöre durch das Abziehen
+            # der gemeinsamen Einrückung ihre Indentation.
+            postPatch = (old.postPatch or "") + ''
+              substituteInPlace backend/open_webui/utils/oauth.py \
+                --replace-fail \
+                  "    data = decrypt_data(info.get('oauth_client_info', '''))" \
+                  "    data = decrypt_data(info['oauth_client_info']) if info.get('oauth_client_info') else {}"
+              substituteInPlace backend/open_webui/utils/oauth.py \
+                --replace-fail \
+                  "    recovered = {**oauth_client_info}" \
+                  "    recovered = {**oauth_client_info}; _wu = str(await Config.get('webui.url') or ''').rstrip('/'); _sid = (connection.get('info') or {}).get('id'); recovered.setdefault('redirect_uris', [f'{_wu}/oauth/clients/mcp:{_sid}/callback'])"
+            '';
           });
           root = pkgsOwui.buildEnv {
             name = "open-webui-root";

@@ -96,10 +96,7 @@
       img = self.packages.${pkgs.stdenv.hostPlatform.system}.kanidm-image;
 
       domain = "idm.mauritiusberger.de";
-      # Phase 1 des Umzugs: BEIDE Namen sind gültige Redirect-Ziele. kanidm-provision
-      # akzeptiert für originUrl eine Liste. In Phase 2 fällt der alte Eintrag weg.
       chatOrigin = "https://chat.steinaberfein.de";
-      chatOriginOld = "https://chat.mauritiusberger.de";
 
       serverToml = ''
         version = "2"
@@ -209,11 +206,8 @@
         };
         systems.oauth2.open-webui = {
           displayName = "Open WebUI";
-          originUrl = [
-            "${chatOrigin}/oauth/oidc/callback"
-            "${chatOriginOld}/oauth/oidc/callback"
-          ];
-          originLanding = "${chatOriginOld}/";
+          originUrl = "${chatOrigin}/oauth/oidc/callback";
+          originLanding = "${chatOrigin}/";
           # `name` statt `spn` im preferred_username-Claim → die OpenWebUI-Konten heißen
           # "mberger", nicht "mberger@idm.mauritiusberger.de".
           preferShortUsername = true;

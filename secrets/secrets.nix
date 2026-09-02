@@ -89,6 +89,13 @@ in
   "openwebui-oidc-secret.age".publicKeys = all ++ [ netcup ];
   # Session-Signing-Key von OpenWebUI. Rotation invalidiert alle Sessions.
   "openwebui-secret-key.age".publicKeys = all ++ [ netcup ];
+  # SearXNG `server.secret_key` — signiert die Such-Sessions. Kein Nutzer-Credential,
+  # aber SearXNG startet ohne einen gesetzten Wert nicht.
+  "searxng-secret.age".publicKeys = all ++ [ netcup ];
+  # Qdrant-API-Key. Der Dienst ist per CiliumNetworkPolicy schon nur für open-webui
+  # erreichbar; der Key ist die zweite Schicht, damit ein Fehlgriff in der Policy nicht
+  # sofort Lese-/Schreibzugriff auf alle Vektoren bedeutet.
+  "qdrant-api-key.age".publicKeys = all ++ [ netcup ];
   # (Ein API-Key für den Modell-Gating-Sidecar wurde bewusst NICHT eingeführt: der Sidecar
   # signiert sich mit dem WEBUI_SECRET_KEY selbst ein kurzlebiges Admin-JWT. Ein Key hätte
   # einen manuellen UI-Schritt und ein weiteres exportierbares Secret bedeutet.)
@@ -117,18 +124,28 @@ in
   # Alle drei werden von modules/bricklink-mcp.nix in das k8s-Secret
   # `chat/bricklink-mcp-secrets` gerendert.
   #
-  # bricklink-api: dotenv mit FÜNF Zeilen — BRICKLINK_CONSUMER_KEY/_SECRET,
-  # BRICKLINK_TOKEN_VALUE/_SECRET und BRICKLINK_STORE_USERNAME (eigener
-  # BL-Benutzername; er ist der Guard, der Schreibzugriffe auf EIGENE Verkäufe
-  # begrenzt). Consumer-Paar auf
-  # api.bricklink.com/pages/clone/api/register_consumer.page anlegen.
+  # EIN SECRET PRO SHOP. Der Dateiname trägt den Slug, den auch der `store`-Parameter
+  # der Tools benutzt; modules/bricklink-mcp.nix bildet die Schlüssel auf
+  # BRICKLINK_STORE_<SLUG>_* ab. Inhalt jeweils dotenv mit FÜNF Zeilen:
+  #   CONSUMER_KEY, CONSUMER_SECRET, TOKEN_VALUE, TOKEN_SECRET, USERNAME
+  # (ein führendes BRICKLINK_ bzw. BRICKLINK_STORE_ wird abgeschnitten, die Datei aus
+  # der Ein-Shop-Zeit funktioniert also unverändert weiter).
   #
-  # ⚠️ Das Token-Paar wird PRO IP ausgestellt und gilt nur von dort
-  # ("BrickLink resources are accessible only from the registered location").
-  # Registriert werden muss die netcup-Public-IP 152.53.15.24 aus
-  # nix-config/base/_network.nix. Wandert der Dienst auf einen anderen Host,
-  # ist das Token dort wertlos, bis es neu ausgestellt ist.
-  "bricklink-api.age".publicKeys = all ++ [ netcup ];
+  # USERNAME ist nicht Kosmetik: er ist der Guard, der Schreibzugriffe auf die
+  # Bestellungen GENAU DIESES Shops begrenzt. Bei einem falschen `store` passt
+  # `seller_name` der Bestellung nicht und es wird nichts geschrieben.
+  #
+  # ⚠️ Das Token-Paar wird PRO IP ausgestellt und gilt laut Doku nur von dort
+  # ("BrickLink resources are accessible only from the registered location") —
+  # registriert werden muss die netcup-Public-IP 152.53.15.24 aus
+  # nix-config/base/_network.nix. Am 2026-08-27 hat BrickLink das allerdings NICHT
+  # durchgesetzt (dasselbe Token lieferte von einer fremden Adresse alle Daten);
+  # verlassen sollte man sich darauf nicht.
+  #
+  # Consumer-Paar anlegen: api.bricklink.com/pages/clone/api/register_consumer.page
+  # — pro Shop mit dem BL-Konto DIESES Shops einloggen.
+  "bricklink-api-steinaberfein.age".publicKeys = all ++ [ netcup ]; # mschuett
+  "bricklink-api-dinoland.age".publicKeys = all ++ [ netcup ]; # mberger
 
   # bricklink-web-token: der clientToken für den BrickStore-Client-Pfad, mit dem
   # der Katalog-Export geholt wird (die Store API hat keine Textsuche, ohne Index
@@ -146,4 +163,19 @@ in
   # Derselbe Wert muss in OpenWebUI unter Admin → Integrations → External Tool
   # Servers eingetragen werden — das ist UI-State, kein Repo-State.
   "bricklink-mcp-bearer.age".publicKeys = all ++ [ netcup ];
+
+  # gmail-mcp-oauth-secret: Client-Secret des Google-OAuth-Clients „Open WebUI
+  # chat.steinaberfein.de" (Projekt gmail-mcp-507417). Damit spricht OpenWebUI Googles
+  # offiziellen Gmail-MCP (gmailmcp.googleapis.com) über `auth_type = "oauth_2.1_static"`
+  # an: die Client-ID steht im Klartext in modules/openwebui.nix — sie ist per OAuth-Design
+  # öffentlich und taucht ohnehin in jeder Autorisierungs-URL auf —, nur das Secret liegt hier.
+  #
+  # Die App steht auf Extern/Test; Zugriff hat nur, wer als Testnutzer eingetragen ist
+  # (aktuell steinaberfeinbl@gmail.com). Der Token-Austausch selbst passiert pro OpenWebUI-
+  # Nutzer und landet verschlüsselt in dessen DB-Zeile, nicht hier.
+  #
+  # Rotieren: in der Cloud Console einen neuen Clientschlüssel erzeugen, hier neu
+  # verschlüsseln, deployen — open-webui startet dabei neu (secretsChecksum), sonst
+  # spricht es Google mit dem alten Secret an und jeder Tool-Aufruf endet in invalid_client.
+  "gmail-mcp-oauth-secret.age".publicKeys = all ++ [ netcup ];
 }

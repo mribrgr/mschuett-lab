@@ -98,10 +98,16 @@ helm template charts/root-app/ | kubectl apply -f -
 
 ## BrickLink-MCP (Namespace `chat`)
 
-MCP-Server, mit dem mschuett seinen BrickLink-Store aus dem Chat verwaltet statt
-über BrickLinks Web-UI: Bestellungen, Nachrichten, Bewertungen, Inventar,
-Katalog/Preis-Guide lesend — schreibend nur `→ PACKED` und `PACKED → SHIPPED`
-(optional mit Sendungsnummer), Feedback und die Versandmail.
+MCP-Server, mit dem **zwei** BrickLink-Shops aus dem Chat verwaltet werden statt über
+BrickLinks Web-UI — SteinAberFein (mschuett) und dinoland (mberger): Bestellungen,
+Nachrichten, Bewertungen, Inventar, Katalog/Preis-Guide lesend — schreibend nur
+`→ PACKED` und `PACKED → SHIPPED` (optional mit Sendungsnummer), Feedback und die
+Versandmail.
+
+Die Shop-Trennung ist die wichtigste Eigenschaft: jedes store-bezogene Tool nimmt
+einen `store`-Parameter, ohne eindeutigen Shop lehnt es ab statt zu raten, jede
+Antwort nennt den Shop, und jeder schreibende Aufruf prüft zusätzlich den
+`seller_name` der Bestellung gegen den Benutzernamen des gewählten Shops.
 
 `modules/bricklink-mcp.nix` + `pkgs/bricklink-mcp/`. Kein Ingress: OpenWebUI
 verbindet clusterintern per Streamable HTTP, davor eine CiliumNetworkPolicy und

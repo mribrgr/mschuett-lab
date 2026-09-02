@@ -25,10 +25,18 @@
             overlays = [ inputs.nix-snapshotter.overlays.default ];
             config.allowUnfreePredicate = p: (pkgs.lib.getName p) == "open-webui";
           };
+          # nixpkgs baut open-webui ohne die optionalen Vektor-DB-Clients. Mit
+          # VECTOR_DB=qdrant stirbt der Start deshalb an
+          # `ModuleNotFoundError: No module named 'qdrant_client'` — der Client wird hier
+          # nachgezogen. Client 1.19 gegen Server 1.17.1 (nixpkgs) ist abwärtskompatibel;
+          # der Client warnt beim Verbinden nur über die Versionsdifferenz.
+          openWebui = pkgsOwui.open-webui.overridePythonAttrs (old: {
+            dependencies = (old.dependencies or [ ]) ++ [ pkgsOwui.python3Packages.qdrant-client ];
+          });
           root = pkgsOwui.buildEnv {
             name = "open-webui-root";
             paths = [
-              pkgsOwui.open-webui
+              openWebui
               # sqlite für den velero-Pre-Hook (konsistenter DB-Snapshot); curl/jq/grep/sed
               # für den Modell-Gating-Sidecar und für lesende Diagnose im Pod (ohne grep
               # scheitert jedes `… | grep …` im Container mit "command not found").
@@ -83,13 +91,12 @@
     }:
     let
       img = self.packages.${pkgs.stdenv.hostPlatform.system}.open-webui-image;
-      # PHASE 1 des Umzugs: die Route bedient beide Namen, WEBUI_URL zeigt aber noch auf
-      # den ALTEN — er bestimmt die Redirect-URI, und der neue Name hat erst nach dem
-      # ArgoCD-Push einen Listener samt Zertifikat. In Phase 2 wird das hier auf
-      # newOrigin umgestellt und der alte Name überall entfernt.
-      webuiOrigin = oldOrigin;
-      oldOrigin = "https://chat.mauritiusberger.de";
-      newOrigin = "https://chat.steinaberfein.de";
+      # Umzug abgeschlossen am 2026-08-27 (Phase 2): der Chat läuft auf
+      # chat.steinaberfein.de. WEBUI_URL bestimmt die Redirect-URI — er MUSS mit
+      # `originUrl` des OAuth2-Clients in modules/kanidm.nix und mit dem Gateway-Listener
+      # in charts/root-app/templates/gateway.yaml übereinstimmen, sonst lehnt kanidm den
+      # Login ab. Die drei Stellen wandern immer gemeinsam.
+      webuiOrigin = "https://chat.steinaberfein.de";
       idmOrigin = "https://idm.mauritiusberger.de";
 
       # Die vier Quellen des k8s-Secrets. `hashFile` hasht den INHALT — nicht den
@@ -97,6 +104,7 @@
       # /nix/store/<Hash des GANZEN nix-config-Baums>-source/… auf, womit jede
       # unbeteiligte Änderung in nix-config den Pod neu gestartet hätte.
       secretFiles = [
+        ../secrets/qdrant-api-key.age
         ../secrets/openwebui-oidc-secret.age
         ../secrets/openwebui-secret-key.age
         (inputs.nix-config + "/base/secrets/openrouter-develappers.age")
@@ -105,6 +113,13 @@
         # rotiert er, MUSS open-webui neu starten, sonst spricht es den MCP mit dem alten
         # Token an und jeder Tool-Aufruf endet in 401.
         ../secrets/bricklink-mcp-bearer.age
+        # Rotiert das Kernel-Token, muss open-webui neu starten — es liest es beim
+        # Containerstart aus dem Secret.
+        ../secrets/bricklink-sandbox-token.age
+        # Client-Secret des Google-OAuth-Clients für den Gmail-MCP. Gleiche Logik wie beim
+        # BrickLink-Bearer: es steckt in TOOL_SERVER_CONNECTIONS, also muss open-webui nach
+        # einer Rotation neu starten — sonst spricht es Google mit dem alten Secret an.
+        ../secrets/gmail-mcp-oauth-secret.age
       ];
       secretsChecksum = builtins.hashString "sha256" (
         builtins.concatStringsSep ":" (map (f: builtins.hashFile "sha256" f) secretFiles)
@@ -135,12 +150,48 @@
       # entstehen nur über kanidm-SSO und landen mit DEFAULT_USER_ROLE=pending, können
       # sich also gar nicht anmelden. Der eigentliche Schutz liegt außerdem nicht hier,
       # sondern in der CiliumNetworkPolicy vor dem MCP und im Bearer-Token.
+      # Code-Sandbox: der Jupyter-Container im bricklink-mcp-Pod
+      # (modules/bricklink-mcp.nix). Kein Ingress, nur clusterintern.
+      sandboxUrl = "http://bricklink-mcp.chat.svc.cluster.local:8888";
+
       toolServerId = "bricklink";
       toolServerUrl = "http://bricklink-mcp.chat.svc.cluster.local:8081/mcp";
       # Die Modelle, die den Tool-Server automatisch aktiv haben sollen, führen ihn in
       # `meta.toolIds`. Die Web-UI wählt daraus beim Modellwechsel die Standard-Tools
       # (Chat.svelte: „Set Default Tools"), ohne dass jemand etwas anklicken muss.
       toolServerToolId = "server:mcp:${toolServerId}";
+
+      # ── Gmail: Googles OFFIZIELLER, remote gehosteter MCP ───────────────────────
+      # Kein selbst gebauter Server wie bricklink-mcp, sondern gmailmcp.googleapis.com.
+      # Deshalb auch kein Bearer-Token, sondern OAuth 2.0 pro Nutzer:
+      #
+      #   * `auth_type = "oauth_2.1_static"` — OpenWebUI 0.11 kennt zwei OAuth-Varianten
+      #     (utils/tools.py: `elif auth_type in ('oauth_2.1', 'oauth_2.1_static')`).
+      #     Die dynamische registriert den Client beim AS selbst (RFC 7591); Google
+      #     unterstützt das NICHT, also die statische mit vorab angelegter Client-ID.
+      #   * `info.oauth_client_id` / `info.oauth_client_secret` überschreiben in
+      #     `resolve_oauth_client_info` den gespeicherten Blob — genau der Weg, über den
+      #     die Zugangsdaten aus dem Repo statt aus der UI kommen.
+      #   * Die Redirect-URI baut OpenWebUI als `{WEBUI_URL}/oauth/clients/mcp:{id}/callback`.
+      #     Der Doppelpunkt im Pfad sieht falsch aus, ist aber RFC-3986-konform und wurde
+      #     von der Google Cloud Console am 2026-09-02 akzeptiert. Ändert sich `gmailToolServerId`,
+      #     ändert sich die Redirect-URI — dann MUSS sie im OAuth-Client nachgezogen werden,
+      #     sonst endet die Zustimmung in redirect_uri_mismatch.
+      #   * Das Token holt sich JEDER OpenWebUI-Nutzer selbst (Zustimmung im Browser) und es
+      #     landet verschlüsselt in seiner DB-Zeile — mit WEBUI_SECRET_KEY, der hier aus
+      #     agenix kommt und über Neustarts stabil ist. Wäre er flüchtig, wäre nach jedem
+      #     Pod-Restart jede Gmail-Verbindung tot.
+      #
+      # Google-Projekt `gmail-mcp-507417`, Zustimmungsbildschirm Extern/**Test**: nur wer
+      # dort als Testnutzer steht, kommt durch (aktuell steinaberfeinbl@gmail.com).
+      # Freigegebene Scopes: gmail.readonly + gmail.compose. Der MCP bietet damit Lesen,
+      # Suchen, Threads, Labels und das Anlegen von Entwürfen — **kein Senden**.
+      gmailToolServerId = "gmail";
+      gmailToolServerUrl = "https://gmailmcp.googleapis.com/mcp/v1";
+      # Client-IDs sind per OAuth-Design öffentlich (sie stehen in jeder Autorisierungs-URL),
+      # nur das Secret liegt in agenix. Client: „Open WebUI chat.steinaberfein.de".
+      gmailOauthClientId = "825099451418-3q800m171d09dj9fgflp654smo9vm2mo.apps.googleusercontent.com";
+      gmailToolServerToolId = "server:mcp:${gmailToolServerId}";
 
       # ── Modell-Gating für mschuett ───────────────────────────────────────────────
       # Per-User-Modellsichtbarkeit ist in OpenWebUI DB-State (Tabellen model/access_grant),
@@ -174,11 +225,16 @@
             # überhaupt einen Bild-Upload anbietet; falsch gesetzt wäre es eine Einladung
             # in eine Fehlermeldung.
             vision = false;
-            # Der BrickLink-MCP hängt an ALLEN drei Modellen: mschuett soll seinen Shop
-            # unabhängig davon verwalten können, welches Modell gerade ausgewählt ist.
+            # BrickLink- UND Gmail-MCP hängen an ALLEN drei Modellen: mschuett soll Shop und
+            # Postfach unabhängig davon bedienen können, welches Modell gerade ausgewählt ist.
             # Bei Modellen ohne native Tool-Calls fällt OpenWebUI auf die
             # prompt-basierte Auswahl zurück, der Server funktioniert also überall.
-            tools = [ toolServerToolId ];
+            # Sichtbar heißt nicht nutzbar: der Gmail-MCP antwortet erst, wenn der jeweilige
+            # Nutzer die Google-Zustimmung erteilt hat — vorher liefert er 401.
+            tools = [
+              toolServerToolId
+              gmailToolServerToolId
+            ];
           }
           {
             # Aus dem Claude-Max-Abo über meridian. Bewusst NUR dieses eine Claude-Modell.
@@ -186,7 +242,10 @@
             id = "claude-opus-5";
             name = "Claude Opus 5";
             vision = true;
-            tools = [ toolServerToolId ];
+            tools = [
+              toolServerToolId
+              gmailToolServerToolId
+            ];
           }
           {
             # collana, mit prefix_id aus OPENAI_API_CONFIGS. Vision ebenfalls verifiziert
@@ -194,7 +253,10 @@
             id = "collana.general";
             name = "Collana General";
             vision = true;
-            tools = [ toolServerToolId ];
+            tools = [
+              toolServerToolId
+              gmailToolServerToolId
+            ];
           }
         ];
       };
@@ -315,9 +377,18 @@
         Dein verlässlicher Wissensstand endet Ende Mai 2026. Du antwortest wie ein sehr gut
         informierter Mensch von Mai 2026 und sagst das, wo es relevant ist.
 
-        In dieser Umgebung hast du KEINE Websuche und kein Gedächtnis über Gespräche hinaus.
-        Bei Ereignissen, Zahlen oder Personen, die sich seit Mai 2026 geändert haben können,
-        sagst du das offen — du behauptest nicht, gesucht zu haben, und du ratest nicht.
+        In dieser Umgebung hast du eine Websuche (SearXNG) und ein Gedächtnis über Gespräche
+        hinaus. Beides benutzt du aktiv statt zu raten: bei Ereignissen, Zahlen oder
+        Personen, die sich seit Mai 2026 geändert haben können, suchst du nach — ohne vorher
+        um Erlaubnis zu fragen — und sagst, worauf sich deine Antwort stützt. Was du im
+        Gedächtnis behältst, erwähnst du nicht ungefragt; es fließt einfach ein.
+
+        ## Rechnen
+        Zahlen rätst du nicht. Sobald eine Rechnung über Kopfrechnen hinausgeht — mehrere
+        Stellen, Prozente, Zinsen, Einheiten, Datumsdifferenzen, Summen über Listen,
+        Statistik — benutzt du den Python-Interpreter und nennst das Ergebnis, das er
+        ausgibt. Du erfindest keine Zwischenergebnisse und schreibst kein Ergebnis hin,
+        das du nicht ausgerechnet hast.
 
         ## Identität — verbindlich, hat Vorrang
         Fragt jemand nach Modell, Version, Hersteller, Familie oder Trainingsstand,
@@ -452,7 +523,15 @@
                         --argjson vision "$vision" --argjson grants "$grants" \
                         --argjson tools "$tools" '{
             id: $id, name: $name, is_active: true,
-            meta: { description: "verwaltet von modules/openwebui.nix", capabilities: { vision: $vision }, toolIds: $tools },
+            meta: {
+              description: "verwaltet von modules/openwebui.nix",
+              capabilities: { vision: $vision, web_search: true, code_interpreter: true },
+              # defaultFeatureIds: die Web-UI schaltet diese Regler beim Modellwechsel von
+              # selbst EIN (Chat.svelte prüft capabilities + Server-Feature + Nutzerrecht).
+              # Ohne das sind Websuche und Interpreter da, aber in jedem neuen Chat aus.
+              defaultFeatureIds: [ "web_search", "code_interpreter" ],
+              toolIds: $tools
+            },
             params: { system: $sys },
             access_grants: $grants }')
           if curl -sf -X POST -H "$AUTH" -H 'Content-Type: application/json' \
@@ -546,6 +625,20 @@
         # Modell-Gating wirkungslos.
         BYPASS_MODEL_ACCESS_CONTROL = "False";
 
+        # Schickt beim Aufruf externer Tool-Server die Header X-OpenWebUI-User-Email,
+        # -Name, -Id und -Role mit (open_webui/utils/headers.py).
+        #
+        # Nötig für den BrickLink-MCP: der bedient ZWEI Shops und entscheidet daran,
+        # welcher Shop gilt, wenn der Nutzer keinen nennt (mschuett → SteinAberFein,
+        # mberger → dinoland). Ohne diese Header kennt der MCP den Aufrufer nicht und
+        # verlangt bei JEDEM Aufruf eine ausdrückliche Shop-Angabe — funktional in
+        # Ordnung, im Gespräch aber lästig.
+        #
+        # Der Empfänger ist nicht beliebig: an den MCP kommt per CiliumNetworkPolicy
+        # nur dieser Pod, und er muss zusätzlich den Bearer-Token vorweisen. Die
+        # einzigen weiteren Tool-Server wären künftige eigene Dienste.
+        ENABLE_FORWARD_USER_INFO_HEADERS = "True";
+
         # ── Backends ────────────────────────────────────────────────────────────
         # Reihenfolge MUSS index-gleich zu OPENAI_API_KEYS im Secret sein (Index 0/1/2).
         # meridian läuft im Cluster und bridged das Claude-Max-Abo; es braucht keinen
@@ -565,6 +658,129 @@
         };
         ENABLE_OLLAMA_API = "False";
 
+        # ── Vektorspeicher ──────────────────────────────────────────────────────
+        # Qdrant statt des eingebauten chroma (modules/qdrant.nix): eigener Dienst, eigene
+        # PVC, Index auf der Platte statt im RAM. Trägt RAG-Dokumente UND die Memories.
+        # ⚠️ Ein Wechsel migriert NICHT — was in chroma lag, ist hier nicht da.
+        VECTOR_DB = "qdrant";
+        QDRANT_URI = "http://qdrant.chat.svc.cluster.local:6333";
+        QDRANT_ON_DISK = "True";
+        # Multitenancy ist Default und richtig: eine Collection pro Nutzer-Scope statt
+        # einer gemeinsamen, in der ein Filter-Fehler fremde Treffer liefern würde.
+        ENABLE_QDRANT_MULTITENANCY_MODE = "True";
+
+        # ── Memory ──────────────────────────────────────────────────────────────
+        # 0.11 verwaltet Memories aktiv per Tool-Call statt sie nur passiv einzuspeisen.
+        # ENABLE_MEMORY_BACKGROUND_REVIEW ist upstream AUS und der eigentliche Hebel: damit
+        # sieht das Modell alle N Züge seinen Gedächtnisstand durch und räumt auf, statt nur
+        # anzuhäufen. Die Char-Limits sind bewusst über den Defaults (2000) — 2000 Zeichen
+        # sind nach ein paar Wochen voll.
+        ENABLE_MEMORIES = "True";
+        ENABLE_MEMORY_SYSTEM_CONTEXT = "True";
+        ENABLE_MEMORY_BACKGROUND_REVIEW = "True";
+        # 1 statt upstream 10: nach JEDEM Zug prüfen.
+        #
+        # Das Intervall ist eine reine Kostenbremse, kein Qualitätsfilter — ob überhaupt
+        # etwas gespeichert wird, entscheidet das Review selbst („Use an empty operations
+        # array if nothing should be remembered"). Alles > 1 heißt nur: in kurzen Chats
+        # wird gar nicht nachgedacht. Gemessen am 2026-09-02 über 18 echte Chats: sieben
+        # hatten genau 2 Nutzerzüge, mit Intervall 6 lief das Review in DREI von 18.
+        #
+        # Preis: ein zusätzlicher Aufruf pro Antwort, auf dem CHAT-Modell (upstream nimmt
+        # hier bewusst NICHT das Task-Modell: `model_id = model.get("id")` in
+        # utils/memory.py). Der Aufruf läuft als asyncio-Task neben der Antwort, verzögert
+        # sie also nicht, zählt aber bei Opus 5 gegen das Abo. Gebunden ist er auf die
+        # letzten 16 Nachrichten, je auf ~1400 Zeichen gekürzt, plus den Gedächtnisstand.
+        MEMORIES_REVIEW_INTERVAL_TURNS = "1";
+        MEMORIES_USER_CHAR_LIMIT = "8000";
+        MEMORIES_CONTEXT_CHAR_LIMIT = "4000";
+        USER_PERMISSIONS_FEATURES_MEMORIES = "True";
+
+        # ── Code-Interpreter ────────────────────────────────────────────────────
+        # Engine pyodide: das Python läuft als WASM IM BROWSER des Nutzers, nicht im Pod.
+        # Kein Jupyter, kein Netzzugang, kein pip — dafür echtes Rechnen statt geratener
+        # Zahlen, und der Cluster trägt keine fremde Code-Ausführung.
+        # Beides ist upstream schon True; hier explizit, weil ENABLE_PERSISTENT_CONFIG=False
+        # die Env zur einzigen Quelle macht und Defaults sich ändern dürfen.
+        ENABLE_CODE_EXECUTION = "True";
+        ENABLE_CODE_INTERPRETER = "True";
+
+        # ── Code-Interpreter: jupyter statt pyodide (2026-09-02) ────────────────
+        # pyodide läuft im BROWSER. Zwei Grenzen, an denen mschuett hängengeblieben ist:
+        #   * keine PDF-Bibliotheken, und Nachinstallieren ist dort ausdrücklich
+        #     verboten (OpenWebUIs eigener pyodide-Prompt sagt das dem Modell),
+        #   * erzeugte Dateien landen in `/mnt/uploads` — einer IndexedDB IM BROWSER
+        #     (src/lib/workers/pyodide.worker.ts). Deshalb kam niemand an sie heran.
+        # Der Kernel läuft jetzt als Container `sandbox` im bricklink-mcp-Pod
+        # (modules/bricklink-mcp.nix) mit pypdf/pikepdf/pdfplumber/pymupdf/reportlab,
+        # pandas, matplotlib, openpyxl, python-docx.
+        #
+        # ⚠️ Beim jupyter-Motor injiziert OpenWebUI KEINE Dateien in die Sandbox — das
+        # `/mnt/uploads` aus der pyodide-Welt gibt es serverseitig nicht. Deshalb
+        # mountet der Sandbox-Container das PVC von open-webui LESEND unter
+        # /mnt/uploads, und der Prompt unten erklärt dem Modell beide Verzeichnisse.
+        CODE_EXECUTION_ENGINE = "jupyter";
+        CODE_INTERPRETER_ENGINE = "jupyter";
+        CODE_EXECUTION_JUPYTER_URL = sandboxUrl;
+        CODE_INTERPRETER_JUPYTER_URL = sandboxUrl;
+        CODE_EXECUTION_JUPYTER_AUTH = "token";
+        CODE_INTERPRETER_JUPYTER_AUTH = "token";
+        # 300 s statt der 60 s Default: ein PDF-Rendering oder eine Auswertung über
+        # einen 7,5-MB-Export braucht länger als eine Kopfrechnung.
+        CODE_EXECUTION_JUPYTER_TIMEOUT = "300";
+        CODE_INTERPRETER_JUPYTER_TIMEOUT = "300";
+
+        # Ersetzt OpenWebUIs Standardprompt. Der Default beschreibt eine
+        # Browser-Umgebung („runs directly in the user's browser") — das wäre jetzt
+        # falsch. Hier steht stattdessen, was tatsächlich da ist.
+        CODE_INTERPRETER_PROMPT_TEMPLATE = ''
+          #### Code Interpreter
+
+          Du hast einen Python-Interpreter über: `<code_interpreter type="code" lang="python"></code_interpreter>`
+
+          - Der Code läuft in einem Jupyter-Kernel auf dem Server, nicht im Browser.
+          - **Code MUSS in den XML-Tags stehen**, danach hörst du auf zu schreiben. Ohne
+            die Tags wird nichts ausgeführt. Keine ``` innerhalb der Tags.
+          - **Immer ausdrücklich ausgeben** (print, display) — implizite Ergebnisse
+            werden nicht angezeigt.
+          - Nach dem Ergebnis: kurze Einordnung, keine Wiederholung des Codes.
+
+          ##### Dateien
+
+          - **Hochgeladene Dateien liegen LESEND unter `/mnt/uploads/`.** Die Namen
+            haben die Form `<id>_<originalname>`; mit
+            `sorted(os.listdir('/mnt/uploads'), key=lambda n: os.path.getmtime('/mnt/uploads/'+n))[-5:]`
+            findest du die neuesten. Dieses Verzeichnis ist nicht beschreibbar.
+          - **Eigene Ergebnisse schreibst du nach `/data/workspace/`.** Nur von dort
+            gibt es Download-Links.
+          - Einen Link holst du über das BrickLink-Tool `workspace_link` mit dem
+            Dateinamen; `workspace_list` zeigt, was da liegt. Den Link gibst du dem
+            Nutzer unverändert weiter — er läuft nach einer Stunde ab.
+          - Das Arbeitsverzeichnis bleibt über Ausführungen und Neustarts erhalten.
+
+          ##### Bibliotheken
+
+          Vorhanden: pypdf, pikepdf, pdfplumber, pymupdf (fitz), reportlab, pandas,
+          numpy, matplotlib, openpyxl, python-docx, PIL, lxml, bs4, requests.
+
+          **Nachinstallieren ist nicht möglich** (unveränderliches nix-Environment) —
+          fehlt etwas, sag es und löse es mit dem Vorhandenen. Für PDF-Formulare:
+          `pypdf` liest und schreibt AcroForm-Felder, `pymupdf` rendert und kann
+          Textblöcke setzen, `pikepdf` ist für strukturelle Reparaturen da.
+        '';
+        USER_PERMISSIONS_FEATURES_CODE_INTERPRETER = "True";
+        USER_PERMISSIONS_FEATURES_WEB_SEARCH = "True";
+
+        # ── Websuche ────────────────────────────────────────────────────────────
+        # SearXNG im Cluster (modules/searxng.nix). Der `<query>`-Platzhalter und
+        # `format=json` sind Pflicht — ohne json antwortet SearXNG mit 403.
+        ENABLE_WEB_SEARCH = "True";
+        WEB_SEARCH_ENGINE = "searxng";
+        SEARXNG_QUERY_URL = "http://searxng.chat.svc.cluster.local:8080/search?q=<query>&format=json";
+        SEARXNG_LANGUAGE = "de-DE";
+        WEB_SEARCH_RESULT_COUNT = "5";
+        WEB_SEARCH_CONCURRENT_REQUESTS = "5";
+
         # ── Anhänge und RAG ─────────────────────────────────────────────────────
         # Upload MUSS an sein, sonst scheitert schon das Einfügen eines Screenshots mit
         # „You do not have permission to upload files" — Bilder laufen in OpenWebUI über
@@ -582,7 +798,6 @@
         # Hybrid-Suche bräuchte zusätzlich ein Reranker-Modell im Pod — dafür ist auf
         # diesem Node kein RAM übrig.
         ENABLE_RAG_HYBRID_SEARCH = "False";
-        ENABLE_WEB_SEARCH = "False";
 
         # ── Telemetrie ──────────────────────────────────────────────────────────
         # open-webui 0.11 liest selbst KEINE dieser Variablen (im Upstream-Dockerfile
@@ -595,11 +810,18 @@
     {
       age.secrets.openwebui-oidc-secret.file = ../secrets/openwebui-oidc-secret.age;
       age.secrets.openwebui-secret-key.file = ../secrets/openwebui-secret-key.age;
+      # Dieselbe Datei prüft qdrant serverseitig (modules/qdrant.nix) — eine Quelle,
+      # zwei Konsumenten.
+      age.secrets.qdrant-api-key.file = ../secrets/qdrant-api-key.age;
       # Welt-übergreifend genutzte LLM-Keys: liegen in nix-config/base/secrets/ und kommen
       # über den nix-config-Input. netcup ist dort seit 2026-08-26 Recipient.
       age.secrets.openrouter-develappers.file =
         inputs.nix-config + "/base/secrets/openrouter-develappers.age";
       age.secrets.collana-auth-token.file = inputs.nix-config + "/base/secrets/collana-auth-token.age";
+      # Client-Secret des Google-OAuth-Clients für den Gmail-MCP. Anders als
+      # bricklink-mcp-bearer gehört es KEINEM anderen Modul — es wird nur hier gebraucht,
+      # also wird es auch hier deklariert.
+      age.secrets.gmail-mcp-oauth-secret.file = ../secrets/gmail-mcp-oauth-secret.age;
       # bricklink-mcp-bearer wird NICHT hier deklariert: das Secret gehört
       # modules/bricklink-mcp.nix, das es ebenfalls in ein k8s-Secret rendert. Hier wird
       # nur sein entschlüsselter Pfad gelesen. Folge: openwebui.nix setzt voraus, dass
@@ -664,7 +886,13 @@
           # Separater Key für die Embeddings: OpenWebUI liest für RAG NICHT aus
           # OPENAI_API_KEYS, sondern aus RAG_OPENAI_API_KEY. Gleicher Wert wie Index 0.
           printf '%s' "$(cat ${config.age.secrets.openrouter-develappers.path})" > "$tmp/RAG_OPENAI_API_KEY"
+          printf '%s' "$(cat ${config.age.secrets.qdrant-api-key.path})" > "$tmp/QDRANT_API_KEY"
           printf '%s' "$(cat ${config.age.secrets.openwebui-oidc-secret.path})" > "$tmp/OAUTH_CLIENT_SECRET"
+          # Token des Jupyter-Kernels. Dieselbe agenix-Datei, die auch der
+          # Sandbox-Container benutzt — deklariert wird sie in modules/bricklink-mcp.nix.
+          printf '%s' "$(cat ${config.age.secrets.bricklink-sandbox-token.path})" \
+            > "$tmp/CODE_EXECUTION_JUPYTER_AUTH_TOKEN"
+          cp "$tmp/CODE_EXECUTION_JUPYTER_AUTH_TOKEN" "$tmp/CODE_INTERPRETER_JUPYTER_AUTH_TOKEN"
 
           # TOOL_SERVER_CONNECTIONS gehört ins SECRET, nicht in die ConfigMap: das Feld
           # `key` IST der Bearer-Token des MCP. `jq -j` (kein Newline) — ein \n in einer
@@ -672,7 +900,11 @@
           # OPENAI_API_KEYS, und json.loads würde bei einem abgeschnittenen Wert scheitern.
           jq -j -n --arg url ${lib.escapeShellArg toolServerUrl} \
                    --arg id ${lib.escapeShellArg toolServerId} \
-                   --arg key "$(cat ${config.age.secrets.bricklink-mcp-bearer.path})" '[{
+                   --arg key "$(cat ${config.age.secrets.bricklink-mcp-bearer.path})" \
+                   --arg gmailUrl ${lib.escapeShellArg gmailToolServerUrl} \
+                   --arg gmailId ${lib.escapeShellArg gmailToolServerId} \
+                   --arg gmailClientId ${lib.escapeShellArg gmailOauthClientId} \
+                   --arg gmailClientSecret "$(cat ${config.age.secrets.gmail-mcp-oauth-secret.path})" '[{
             url: $url,
             path: "",
             type: "mcp",
@@ -687,14 +919,33 @@
               name: "BrickLink",
               description: "Bestellungen, Nachrichten, Bewertungen, Inventar, Katalog und Preis-Guide des eigenen BrickLink-Stores. Schreibend nur: gepackt melden, versendet melden (mit Sendungsnummer), Feedback, Versandmail."
             }
+          },{
+            url: $gmailUrl,
+            path: "",
+            type: "mcp",
+            auth_type: "oauth_2.1_static",
+            config: {
+              enable: true,
+              access_grants: [ { principal_type: "user", principal_id: "*", permission: "read" } ]
+            },
+            info: {
+              id: $gmailId,
+              name: "Gmail",
+              description: "Googles offizieller Gmail-MCP. Mails und Threads suchen und lesen, Labels verwalten, Entwürfe anlegen. Kein Senden. Jeder Nutzer meldet sich einmalig mit seinem eigenen Google-Konto an.",
+              oauth_client_id: $gmailClientId,
+              oauth_client_secret: $gmailClientSecret
+            }
           }]' > "$tmp/TOOL_SERVER_CONNECTIONS"
 
           out=$(k3s kubectl create secret generic open-webui-secrets -n chat \
             --from-file="$tmp/OPENAI_API_KEYS" \
             --from-file="$tmp/WEBUI_SECRET_KEY" \
             --from-file="$tmp/RAG_OPENAI_API_KEY" \
+            --from-file="$tmp/QDRANT_API_KEY" \
             --from-file="$tmp/OAUTH_CLIENT_SECRET" \
             --from-file="$tmp/TOOL_SERVER_CONNECTIONS" \
+            --from-file="$tmp/CODE_EXECUTION_JUPYTER_AUTH_TOKEN" \
+            --from-file="$tmp/CODE_INTERPRETER_JUPYTER_AUTH_TOKEN" \
             --dry-run=client -o yaml | k3s kubectl apply -f -)
           echo "$out"
 
@@ -770,6 +1021,23 @@
                   };
                 };
                 spec = {
+                  # ── Rollout ohne Abbruch mitten in einer Antwort ─────────────────────
+                  # `strategy = Recreate` + `replicas = 1` ist wegen der sqlite-DB auf einer
+                  # RWO-PVC Pflicht (zwei Prozesse auf derselben Datei = Korruption). Damit
+                  # ist eine Lücke beim Rollout unvermeidbar — ein HARTER Abbruch laufender
+                  # Antworten ist es nicht.
+                  #
+                  # Am 2026-09-02 genau das passiert: mehrere System-Switches am Tag rollten
+                  # den Pod, die laufenden SSE-Streams rissen mitten im Satz ab, und das
+                  # Frontend stolperte über `JSON.parse` des halben Chunks — dem Nutzer
+                  # erschien ein „JSON parse error".
+                  #
+                  # preStop nimmt den Pod erst aus den Service-Endpoints (10 s Karenz, in der
+                  # kubelet die Endpoint-Löschung propagiert), DANN kommt SIGTERM, und uvicorn
+                  # beendet von sich aus keine laufende Anfrage, sondern nimmt nur keine neuen
+                  # mehr an. Die Grace-Period muss deshalb länger sein als eine lange Antwort
+                  # (Opus mit großem Kontext: Minuten) — 30 s Default reichte nicht.
+                  terminationGracePeriodSeconds = 300;
                   securityContext = {
                     runAsUser = 1000;
                     runAsGroup = 1000;
@@ -791,6 +1059,12 @@
                       image = img.image;
                       imagePullPolicy = "IfNotPresent";
                       ports = [ { containerPort = 8080; } ];
+                      # Drain-Fenster vor SIGTERM (siehe Begründung an
+                      # terminationGracePeriodSeconds).
+                      lifecycle.preStop.exec.command = [
+                        "/bin/sleep"
+                        "10"
+                      ];
                       envFrom = [
                         { configMapRef.name = "open-webui-env"; }
                         { secretRef.name = "open-webui-secrets"; }
@@ -908,18 +1182,8 @@
                   kind = "Gateway";
                   sectionName = "https-chat";
                 }
-                {
-                  # Phase 1: auch am alten Listener, damit der bisherige Name weiterläuft.
-                  name = "main";
-                  namespace = "default";
-                  kind = "Gateway";
-                  sectionName = "https-chat-alt";
-                }
               ];
-              hostnames = [
-                "chat.steinaberfein.de"
-                "chat.mauritiusberger.de"
-              ];
+              hostnames = [ "chat.steinaberfein.de" ];
               rules = [
                 {
                   backendRefs = [
@@ -951,10 +1215,7 @@
                   sectionName = "http";
                 }
               ];
-              hostnames = [
-                "chat.steinaberfein.de"
-                "chat.mauritiusberger.de"
-              ];
+              hostnames = [ "chat.steinaberfein.de" ];
               rules = [
                 {
                   filters = [

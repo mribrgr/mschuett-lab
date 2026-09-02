@@ -25,17 +25,28 @@ class NotAllowed(RuntimeError):
     pass
 
 
-def check_transition(order: dict, target: str, store_username: str) -> None:
-    current = (order.get("status") or "").upper()
-    seller = order.get("seller_name") or ""
-    order_id = order.get("order_id")
+def check_seller(order: dict, store_username: str, store_label: str) -> None:
+    """Gehört die Bestellung dem gewählten Store?
 
+    Das ist die Datenschranke gegen Shop-Verwechslung: greift ein Aufruf mit dem
+    falschen Store, hat die Bestellung dort einen anderen `seller_name` (oder
+    existiert gar nicht) — dann wird nichts geschrieben.
+    """
+    seller = order.get("seller_name") or ""
     if store_username and seller.casefold() != store_username.casefold():
         raise NotAllowed(
-            f"Bestellung {order_id} hat seller_name={seller!r} — das ist keine Bestellung "
-            f"aus dem Store {store_username!r}. Schreibzugriffe sind nur auf EIGENE "
-            "Verkäufe erlaubt (bei Einkäufen wäre man der Käufer)."
+            f"Bestellung {order.get('order_id')} hat seller_name={seller!r}, "
+            f"gewählt war aber der Shop {store_label!r} ({store_username}). "
+            "Entweder ist der falsche Shop angegeben, oder es ist ein Einkauf "
+            "(dort sind wir der Käufer). Es wurde NICHTS geändert."
         )
+
+
+def check_transition(order: dict, target: str, store_username: str, store_label: str = "") -> None:
+    current = (order.get("status") or "").upper()
+    order_id = order.get("order_id")
+
+    check_seller(order, store_username, store_label or store_username)
 
     sources = ALLOWED.get(target)
     if sources is None:

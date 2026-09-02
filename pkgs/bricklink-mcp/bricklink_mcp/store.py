@@ -18,7 +18,7 @@ from typing import Any
 import requests
 from requests_oauthlib import OAuth1
 
-from .config import Config
+from .config import Config, Store
 from .state import State
 
 # Überschreibbar ausschließlich für Tests (tests/test_bricklink_mcp.py fährt einen
@@ -37,20 +37,29 @@ class BrickLinkError(RuntimeError):
 
 
 class StoreApi:
-    def __init__(self, cfg: Config, state: State) -> None:
+    """API-Zugang für GENAU EINEN Store. Pro Shop eine Instanz — die Credentials
+    sind nicht austauschbar, und der Kontingentzähler hängt am Consumer-Key.
+    """
+
+    def __init__(self, cfg: Config, state: State, store: Store) -> None:
         self._cfg = cfg
         self._state = state
+        self._store = store
         self._session = requests.Session()
         self._session.headers["User-Agent"] = cfg.user_agent
         self._signature_type = "AUTH_HEADER"
 
+    @property
+    def store(self) -> Store:
+        return self._store
+
     # ── Transport ──────────────────────────────────────────────────────────
     def _auth(self) -> OAuth1:
         return OAuth1(
-            self._cfg.consumer_key,
-            client_secret=self._cfg.consumer_secret,
-            resource_owner_key=self._cfg.token_value,
-            resource_owner_secret=self._cfg.token_secret,
+            self._store.consumer_key,
+            client_secret=self._store.consumer_secret,
+            resource_owner_key=self._store.token_value,
+            resource_owner_secret=self._store.token_secret,
             signature_type=self._signature_type,
         )
 
@@ -61,15 +70,17 @@ class StoreApi:
         params: dict[str, Any] | None = None,
         json_body: Any | None = None,
     ) -> Any:
-        if not self._cfg.has_store_api:
+        if not self._store.usable:
             raise BrickLinkError(
-                "Keine Store-API-Credentials gesetzt (BRICKLINK_CONSUMER_KEY/…). "
-                "Consumer-Key auf api.bricklink.com/pages/clone/api/register_consumer.page "
-                "anlegen und das Token für die Server-IP registrieren."
+                f"Für den Store {self._store.label!r} sind keine API-Credentials "
+                "hinterlegt. Consumer-Key auf "
+                "api.bricklink.com/pages/clone/api/register_consumer.page anlegen, "
+                "Token ausstellen und in das agenix-Secret des Stores eintragen "
+                f"(bricklink-api-{self._store.slug}.age)."
             )
         params = {k: v for k, v in (params or {}).items() if v is not None}
         url = BASE + path
-        self._state.spend()
+        self._state.spend(self._store.slug)
         resp = self._session.request(
             method, url, params=params, json=json_body, auth=self._auth(), timeout=60
         )
@@ -78,7 +89,7 @@ class StoreApi:
         # einmalig umschalten statt am Auth-Header zu verzweifeln.
         if resp.status_code == 401 and self._signature_type == "AUTH_HEADER":
             self._signature_type = "QUERY"
-            self._state.spend()
+            self._state.spend(self._store.slug)
             resp = self._session.request(
                 method, url, params=params, json=json_body, auth=self._auth(), timeout=60
             )

@@ -133,13 +133,12 @@ spec:
     # `from: All` ist hier NICHT optional — die HTTPRoutes liegen in Namespace
     # `chat`, das Gateway in `default`.
     # ── Umzug des Chats: chat.mauritiusberger.de → chat.steinaberfein.de ──────
-    # BEIDE Listener stehen hier, absichtlich. Der Listener kommt über ArgoCD aus dem
-    # GEPUSHTEN Repo, die HTTPRoutes dagegen aus dem Flake — die zwei Quellen gehen also
-    # zu verschiedenen Zeitpunkten live. Gäbe es nur den neuen Namen, wäre der Chat
-    # zwischen Flake-Deploy und Push nicht erreichbar.
+    # Umzug abgeschlossen am 2026-08-27. Der Zwischenschritt mit einem zweiten Listener
+    # `https-chat-alt` auf dem alten Namen ist bewusst wieder entfernt.
     #
-    # Phase 2 (nach verifiziertem Login auf dem neuen Namen): `https-chat-alt` und den
-    # alten Hostnamen aus modules/openwebui.nix + modules/kanidm.nix entfernen.
+    # Merksatz für den nächsten Umzug: Listener kommen über ArgoCD aus dem GEPUSHTEN Repo,
+    # die HTTPRoutes aus dem Flake — beide Quellen gehen zu verschiedenen Zeitpunkten live.
+    # Deshalb erst BEIDE Namen bedienen, dann umschalten, dann den alten entfernen.
     #
     # Beim Umzug wandern DREI Stellen mit, sonst bricht der Login: der Listener hier,
     # `webuiOrigin` in modules/openwebui.nix (WEBUI_URL + OPENID_REDIRECT_URI) und
@@ -152,17 +151,6 @@ spec:
         mode: Terminate
         certificateRefs:
           - name: chat-steinaberfein-de-tls
-      allowedRoutes:
-        namespaces:
-          from: All
-    - name: https-chat-alt
-      protocol: HTTPS
-      port: 443
-      hostname: chat.mauritiusberger.de
-      tls:
-        mode: Terminate
-        certificateRefs:
-          - name: chat-mauritiusberger-de-tls
       allowedRoutes:
         namespaces:
           from: All

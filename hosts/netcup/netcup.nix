@@ -66,6 +66,10 @@
         # CiliumNetworkPolicy nur für den open-webui-Pod erreichbar — der Port ist das
         # Abo-Credential.
         self.outputs.modules.nixos.meridian
+        # Vektorspeicher für RAG und Memories; Websuche. Beide nur intern erreichbar
+        # (keine HTTPRoute, CiliumNetworkPolicy nur für open-webui).
+        self.outputs.modules.nixos.qdrant
+        self.outputs.modules.nixos.searxng
 
         # BrickLink-MCP: mschuett verwaltet seinen Store über den Chat statt über
         # BrickLinks Web-UI. Kein Ingress, nur clusterintern für open-webui (CNP +

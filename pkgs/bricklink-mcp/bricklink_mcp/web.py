@@ -19,8 +19,12 @@ mit klarer Ansage, statt eine HTML-Seite als XML zu parsen.
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import time
+from datetime import date
+from typing import Any
 
 import requests
 
@@ -63,8 +67,25 @@ class TokenExpired(WebSessionError):
 
 
 class WebSession:
-    def __init__(self, cfg: Config) -> None:
+    """Eine Web-Session = EIN BrickLink-Konto.
+
+    `client_token` entscheidet, wessen Daten die Exporte liefern. Für den Katalog ist
+    das egal, für Bestellungen/Inventar/Wanted-Lists NICHT — deshalb bekommt jeder
+    Shop seine eigene Session, und `verify_account` prüft vor der Auslieferung, dass
+    das Konto zum Shop passt.
+    """
+
+    def __init__(
+        self,
+        cfg: Config,
+        client_token: str | None = None,
+        context: str = "Katalog",
+        secret_hint: str = "bricklink-web-token.age",
+    ) -> None:
         self._cfg = cfg
+        self._client_token = client_token if client_token is not None else cfg.catalog_web_token
+        self._context = context
+        self._secret_hint = secret_hint
         self._session = requests.Session()
         self._session.headers.update(
             {
@@ -73,21 +94,27 @@ class WebSession:
             }
         )
         self._token: str | None = None
+        self._account: tuple[str, str] | None = None
+
+    @property
+    def configured(self) -> bool:
+        return bool(self._cfg.web_client_id and self._client_token)
 
     def login(self, force: bool = False) -> str:
         if self._token and not force:
             return self._token
-        if not self._cfg.has_web_session:
+        if not self.configured:
             raise WebSessionError(
-                "Kein BRICKLINK_WEB_CLIENT_TOKEN gesetzt. Token auf "
+                f"Kein Web-Token für {self._context} hinterlegt. Token auf "
                 "https://bricklink.com/v3/brickstore-access-management.page erzeugen "
-                "(30 Tage gültig) und als agenix-Secret hinterlegen."
+                f"(30 Tage gültig, mit dem BL-Konto DIESES Shops) und in {self._secret_hint} "
+                "als WEB_TOKEN eintragen."
             )
         resp = self._session.post(
             SESSION_URL,
             json={
                 "clientId": self._cfg.web_client_id,
-                "clientToken": self._cfg.web_client_token,
+                "clientToken": self._client_token,
             },
             timeout=60,
             allow_redirects=False,
@@ -140,15 +167,194 @@ class WebSession:
                     self.login(force=True)
                     return self.get(page, params, retry=False)
                 raise TokenExpired(
-                    "BrickLink schickt uns auf die Anmeldeseite: der 30-Tage-clientToken "
-                    "ist abgelaufen. Neu erzeugen auf "
-                    "https://bricklink.com/v3/brickstore-access-management.page und das "
-                    "agenix-Secret bricklink-web-token.age aktualisieren."
+                    f"BrickLink schickt uns auf die Anmeldeseite: der 30-Tage-clientToken "
+                    f"für {self._context} ist abgelaufen. Neu erzeugen auf "
+                    "https://bricklink.com/v3/brickstore-access-management.page und "
+                    f"{self._secret_hint} aktualisieren."
                 )
             raise WebSessionError(f"Unerwarteter Redirect auf {target}")
         if resp.status_code != 200:
             raise WebSessionError(f"GET {page} → HTTP {resp.status_code}")
         return resp.content
+
+    def post(self, page: str, data: dict[str, Any] | None = None, retry: bool = True) -> bytes:
+        """POST auf www.bricklink.com — die Store-Exporte sind alle POST-Formulare."""
+        token = self.login()
+        resp = None
+        for attempt, delay in enumerate(RETRY_DELAYS, start=1):
+            resp = self._session.post(
+                WWW + page,
+                data=data or {},
+                headers={SESSION_TOKEN_HEADER: token},
+                timeout=600,
+                allow_redirects=False,
+            )
+            if resp.status_code < 500:
+                break
+            if delay is None:
+                break
+            log.warning(
+                "POST %s → HTTP %s (Versuch %s), neuer Versuch in %ss",
+                page,
+                resp.status_code,
+                attempt,
+                delay,
+            )
+            time.sleep(delay)
+
+        if resp.status_code in (301, 302, 303, 307, 308):
+            target = resp.headers.get("Location", "")
+            # BrickLink leitet eine LEERE Ergebnisliste auf "…error=EOF" um. Das ist
+            # kein Fehler, sondern „keine Treffer" (so behandelt es BrickStore auch).
+            if "error=EOF" in target:
+                return b""
+            if "auth/sign-in" in target:
+                if retry:
+                    self.login(force=True)
+                    return self.post(page, data, retry=False)
+                raise TokenExpired(
+                    f"BrickLink schickt uns auf die Anmeldeseite: der 30-Tage-clientToken "
+                    f"für {self._context} ist abgelaufen. Neu erzeugen auf "
+                    "https://bricklink.com/v3/brickstore-access-management.page und "
+                    f"{self._secret_hint} aktualisieren."
+                )
+            raise WebSessionError(f"Unerwarteter Redirect auf {target}")
+        if resp.status_code != 200:
+            raise WebSessionError(f"POST {page} → HTTP {resp.status_code}")
+        return resp.content
+
+    # ── Kontoprüfung ───────────────────────────────────────────────────────
+
+    def account(self) -> tuple[str, str]:
+        """(BL-Benutzername, userID) des Kontos, dem dieses Token gehört.
+
+        Quelle ist die Wanted-List-Seite: sie enthält `var username = '…'` und
+        `var userID = '…'`. Das ist die einzige gefundene Stelle, an der eine
+        Web-Seite das Konto maschinenlesbar nennt — und der Anker dafür, dass ein
+        Export nicht aus dem falschen Shop kommt.
+        """
+        if self._account:
+            return self._account
+        body = self.post("v2/wanted/list.page").decode("utf-8", errors="replace")
+        name = re.search(r"var\s+username\s*=\s*'([^']*)'", body)
+        uid = re.search(r"var\s+userID\s*=\s*'([^']*)'", body)
+        if not name:
+            raise WebSessionError(
+                "Konto konnte nicht bestimmt werden — BrickLink hat das Seitenformat "
+                "geändert. Store-Exporte werden deshalb NICHT ausgeliefert."
+            )
+        self._account = (name.group(1), uid.group(1) if uid else "")
+        self._wanted_page = body
+        return self._account
+
+    def verify_account(self, expected_username: str) -> None:
+        """Schranke gegen Shop-Verwechslung auf Export-Ebene.
+
+        Ein Web-Token gehört zu einem KONTO. Passt der Kontoname nicht zum
+        Benutzernamen des angefragten Shops, kämen die Daten aus dem falschen Shop —
+        dann lieber abbrechen als falsche Zahlen ausliefern.
+        """
+        if not expected_username:
+            return
+        actual, _uid = self.account()
+        if actual.casefold() != expected_username.casefold():
+            raise WebSessionError(
+                f"Das Web-Token für {self._context} gehört dem BrickLink-Konto "
+                f"{actual!r}, erwartet war {expected_username!r}. Der Export käme aus "
+                "dem FALSCHEN Shop — abgebrochen. Bitte das Token dieses Shops in "
+                f"{self._secret_hint} korrigieren."
+            )
+
+    # ── Store-Exporte (kosten KEIN API-Kontingent) ─────────────────────────
+
+    def orders_xml(
+        self,
+        direction: str = "received",
+        from_date: date | None = None,
+        to_date: date | None = None,
+        order_id: str | None = None,
+    ) -> bytes:
+        """Bestellungen samt Positionen als XML (`orderExcelFinal.asp`).
+
+        Ein Aufruf liefert ALLE Bestellungen des Zeitraums MIT allen Positionen — über
+        die API wären das 1 + n Requests (einer pro Bestellung). Parameter wie in
+        BrickStore (`order.cpp`), `viewType=X` ist das XML-Format; TAB-getrennt gibt es
+        hier nicht (viewType=T liefert 0 Bytes, am 2026-08-27 geprüft).
+        """
+        query: dict[str, Any] = {
+            "action": "save",
+            "orderType": "received" if direction in ("in", "received") else "placed",
+            "viewType": "X",
+            "getStatusSel": "I",
+            "getFiled": "Y",
+            "getDetail": "y",
+            "getDateFormat": "0",  # MM/DD/YY
+            "includeMyCost": "Y",
+        }
+        if order_id:
+            query["orderID"] = order_id
+        elif from_date and to_date:
+            query.update(
+                {
+                    "getOrders": "date",
+                    "fMM": from_date.month,
+                    "fDD": from_date.day,
+                    "fYY": from_date.year,
+                    "tMM": to_date.month,
+                    "tDD": to_date.day,
+                    "tYY": to_date.year,
+                }
+            )
+        return self.post("orderExcelFinal.asp", query)
+
+    def inventory_xml(self) -> bytes:
+        """Komplettes Store-Inventar als XML (`invExcelFinal.asp`).
+
+        Enthält Felder, die die API NICHT hat: DATELASTSOLD, INVDIMX/Y/Z, SUBCONDITION,
+        EXTENDED. Nur XML — viewType=t/T liefert ebenfalls XML (2026-08-27 geprüft).
+        """
+        return self.post(
+            "invExcelFinal.asp",
+            {
+                "itemType": "",
+                "catID": "",
+                "colorID": "",
+                "invNew": "",
+                "itemYear": "",
+                "viewType": "x",
+                "invStock": "Y",
+                "invStockOnly": "",
+                "invQty": "",
+                "invQtyMin": "0",
+                "invQtyMax": "0",
+                "invBrikTrak": "",
+                "invDesc": "",
+            },
+        )
+
+    def wanted_lists(self) -> list[dict[str, Any]]:
+        """Wanted Lists mit Füllstand. Die Store API hat dafür GAR KEINEN Endpunkt.
+
+        Die Seite ist HTML mit einem eingebetteten `var wlJson = {…};`.
+        """
+        self.account()  # füllt _wanted_page
+        body = getattr(self, "_wanted_page", "")
+        m = re.search(r"var\s+wlJson\s*=\s*(\{.*?\});", body, re.S)
+        if not m:
+            raise WebSessionError(
+                "Wanted-Lists nicht gefunden — BrickLink hat das Seitenformat geändert."
+            )
+        try:
+            data = json.loads(m.group(1))
+        except ValueError as exc:
+            raise WebSessionError(f"Wanted-List-JSON nicht lesbar: {exc}") from exc
+        return data.get("wantedLists") or []
+
+    def wanted_xml(self, wanted_list_id: int) -> bytes:
+        """Eine Wanted List als XML (`files/clone/wanted/downloadXML.file`)."""
+        return self.post(
+            "files/clone/wanted/downloadXML.file", {"wantedMoreID": str(wanted_list_id)}
+        )
 
     # ── Katalog-Downloads ──────────────────────────────────────────────────
     # viewType laut BrickStore (textimport.cpp): 1 = Item-Typen,
@@ -159,14 +365,15 @@ class WebSession:
             {"a": "a", "viewType": str(view_type), "downloadType": "X"},
         )
 
-    def catalog_items(self, item_type_id: str) -> bytes:
+    def catalog_items(self, item_type_id: str, download_type: str = "X") -> bytes:
+        """Items eines Typs. download_type "X" = XML, "T" = TAB-getrennt (CSV-artig)."""
         return self.get(
             "catalogDownload.asp",
             {
                 "a": "a",
                 "viewType": "0",
                 "itemType": item_type_id,
-                "downloadType": "X",
+                "downloadType": download_type,
                 # Diese drei Flags schaltet BrickLink für BrickStore frei
                 # ("special BrickStore flag to get default color - thanks Dan",
                 # textimport.cpp): Standardfarbe, Gewicht und Jahr im Export.

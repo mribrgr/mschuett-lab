@@ -1,5 +1,33 @@
 { inputs, self, ... }:
+let
+  # ── Soll-Werte, die AUCH die e2e-Tests prüfen (modules/chat-e2e.nix) ──────────
+  # Bewusst hier oben und als Flake-Output `self.chat` veröffentlicht: stünden sie
+  # doppelt — einmal in der Config, einmal im Test —, würde der Test irgendwann eine
+  # Vergangenheit prüfen und dabei grün bleiben. Ein Test, der nicht mitwandert, ist
+  # schlimmer als keiner.
+  chatSpec = {
+    webuiOrigin = "https://chat.steinaberfein.de";
+    bricklinkToolServerId = "bricklink";
+    gmailToolServerId = "gmail";
+    gmailToolServerUrl = "https://gmailmcp.googleapis.com/mcp/v1";
+    gmailOauthClientId = "825099451418-3q800m171d09dj9fgflp654smo9vm2mo.apps.googleusercontent.com";
+    gmailOauthScope = "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose";
+    # Der Nicht-Admin, gegen den die e2e-Tests die Sichtbarkeit prüfen. Über die Mail
+    # statt über die User-ID: die entsteht erst beim ersten SSO-Login und darf im Repo
+    # nicht geraten werden.
+    limitedUserEmail = "steinaberfeinbl@gmail.com";
+    # Genau die Modelle, die ein Nicht-Admin (mschuett) sehen darf. Gegen modelGrants
+    # unten per assertion abgesichert — driftet eines von beiden, bricht der Eval.
+    limitedModelIds = [
+      "~deepseek/deepseek-v4-flash-latest"
+      "claude-opus-5"
+      "collana.general"
+    ];
+  };
+in
 {
+  flake.chat = chatSpec;
+
   # OpenWebUI mit OIDC-SSO gegen das kanidm aus modules/kanidm.nix.
   #
   # ⚠️ `open-webui` ist in nixpkgs UNFREE („Open WebUI License", Branding-Klausel seit
@@ -33,63 +61,51 @@
           openWebui = pkgsOwui.open-webui.overridePythonAttrs (old: {
             dependencies = (old.dependencies or [ ]) ++ [ pkgsOwui.python3Packages.qdrant-client ];
             # Upstream-Bug (open-webui#20697): ein per TOOL_SERVER_CONNECTIONS deklarierter
-            # MCP-Server mit `auth_type = "oauth_2.1_static"` lässt sich beim Start NICHT
-            # registrieren. `initialize_runtime_config` ruft `resolve_oauth_client_info`,
-            # und das entschlüsselt bedingungslos `info.oauth_client_info` — einen Blob, den
-            # nur `register_client` in die DB schreibt. Mit ENABLE_PERSISTENT_CONFIG=False
-            # liest `Config.get` ausschließlich die Env, der Blob kann also per Definition
-            # nie existieren. `decrypt_data("")` wirft dann `InvalidToken` (deren str() ist
-            # leer — daher die nichtssagende Logzeile "Error adding OAuth client for MCP
-            # tool server gmail:"), und der statische Overlay aus oauth_client_id/-secret
-            # zwei Zeilen darunter wird nie erreicht. Ergebnis: der Client fehlt im Manager,
-            # und /oauth/clients/mcp:gmail/authorize antwortet 404 — die Zustimmung ist
-            # nicht anklickbar.
+            # MCP-Server mit `auth_type = "oauth_2.1_static"` laesst sich beim Start NICHT
+            # registrieren. `initialize_runtime_config` (main.py:586) ruft
+            # `resolve_oauth_client_info`, und das entschluesselt bedingungslos
+            # `info.oauth_client_info` — einen Blob, den nur `register_client` in die DB
+            # schreibt. Mit ENABLE_PERSISTENT_CONFIG=False liest `Config.get` ausschliesslich
+            # die Env, der Blob kann also per Definition nie existieren. `decrypt_data("")`
+            # wirft dann `InvalidToken`, deren str() leer ist — daher die nichtssagende
+            # Logzeile "Error adding OAuth client for MCP tool server gmail:".
             #
-            # Der Patch macht das Entschlüsseln bedingt. Fehlt der Blob, bleibt `data` leer,
-            # der Overlay setzt client_id/client_secret, `recover_static_oauth_client_metadata`
-            # holt scope+resource aus der Protected-Resource-Metadata. `redirect_uris` darf im
-            # MCP-SDK-Modell fehlen ("may be absent or empty"), das Objekt ist also gültig.
-            # Es hat nur noch keine server_metadata — womit `_preflight_authorization_url`
-            # fehlschlägt und der Authorize-Endpunkt upstreams EIGENEN Reparaturpfad
-            # (`register_client` → `get_oauth_client_info_with_static_credentials` mit voller
-            # Discovery) auslöst. Wir stellen also nur den Client bereit, den upstream danach
-            # selbst korrekt aufbaut.
+            # Der Patch ruft fuer den statischen Fall stattdessen upstreams EIGENE Funktion
+            # `get_oauth_client_info_with_static_credentials` — exakt das, was
+            # `register_client` tut: Protected-Resource-Metadata holen, daraus die
+            # Discovery-URLs ableiten, die AS-Metadata laden und daraus ein vollstaendiges
+            # `OAuthClientInformationFull` bauen (redirect_uris, scope, resource,
+            # token_endpoint_auth_method, issuer, server_metadata).
             #
-            # --replace-fail: bricht beim nächsten open-webui-Bump laut, statt still einen
-            # bereits gefixten Upstream zu doppeln. Dann prüfen, ob #20697 zu ist, und den
+            # ⚠️ Ein halb gefuelltes Objekt reicht NICHT. Ein erster Versuch liess nur den
+            # Blob-Zwang weg und ergaenzte redirect_uris, in der Annahme, der Authorize-
+            # Endpunkt wuerde ueber `_preflight_authorization_url` upstreams Reparaturpfad
+            # ausloesen. Tut er nicht: der Preflight faengt jede Exception ab und gibt `True`
+            # zurueck (oauth.py:945-949). Ohne `server_metadata` scheitert dann authlib mit
+            # `Missing "authorize_url" value`, und der Nutzer sieht 400 "OAuth authorization
+            # endpoint could not be resolved for this client" (live gesehen 2026-09-03).
+            #
+            # `request = None` ist sicher: die Funktion nutzt es nur in
+            # `str(webui_url or request.base_url)`, und `webui.url` ist ueber WEBUI_URL
+            # gesetzt — der `or`-Zweig wird also nie ausgewertet.
+            #
+            # Bewusst EINZEILIG ersetzt: Python ist whitespace-sensitiv, und eine mehrzeilige
+            # Ersetzung in einem nix-Indented-String verloere durch das Abziehen der
+            # gemeinsamen Einrueckung ihre Indentation.
+            #
+            # --replace-fail bricht beim naechsten open-webui-Bump laut, statt still einen
+            # bereits gefixten Upstream zu doppeln. Dann pruefen, ob #20697 zu ist, und den
             # Patch ersatzlos entfernen.
             #
-            # Betrifft NUR das Python-Paket. Die Frontend-Derivation (`open-webui-frontend`,
-            # buildNpmPackage) hängt am unveränderten `src` und wird dadurch nicht neu
-            # gebaut — der 3,9-GB-Vite-Build bleibt also aus.
-            #
-            # Zweiter Patch, gleiche Ursache: `OAuthClientInformationFull` verlangt im
-            # gepinnten MCP-SDK `redirect_uris` (im SDK-`main` ist es inzwischen optional —
-            # nicht verwechseln). Ohne Blob fehlt das Feld, und der Konstruktor scheitert mit
-            # "1 validation error for OAuthClientInformationFull: redirect_uris Field required".
-            # `recover_static_oauth_client_metadata` ist async und hat `Config`, also wird die
-            # URL dort ergänzt — exakt so, wie sie upstream in
-            # `get_oauth_client_info_with_static_credentials` gebaut wird:
-            # {webui.url}/oauth/clients/mcp:{id}/callback. Genau diese URI ist im
-            # Google-OAuth-Client hinterlegt.
-            #
-            # Danach fehlt dem Objekt nur noch `server_metadata`; damit scheitert
-            # `_preflight_authorization_url`, und der Authorize-Endpunkt ruft upstreams
-            # `register_client` — der mit voller Discovery das richtige Objekt baut. Genau
-            # dieser Reparaturpfad ist das Ziel: wir liefern nur den Anker, den er braucht.
-            #
-            # Bewusst EINZEILIG ersetzt: Python ist whitespace-sensitiv, und eine
-            # mehrzeilige Ersetzung in einem nix-''''-String verlöre durch das Abziehen
-            # der gemeinsamen Einrückung ihre Indentation.
+            # Haengt an overridePythonAttrs, betrifft also NUR das Python-Paket. Die
+            # Frontend-Derivation (`open-webui-frontend`, buildNpmPackage) haengt am
+            # unveraenderten `src` und wird nicht neu gebaut — der 3,9-GB-Vite-Build
+            # bleibt aus.
             postPatch = (old.postPatch or "") + ''
-              substituteInPlace backend/open_webui/utils/oauth.py \
+              substituteInPlace backend/open_webui/main.py \
                 --replace-fail \
-                  "    data = decrypt_data(info.get('oauth_client_info', '''))" \
-                  "    data = decrypt_data(info['oauth_client_info']) if info.get('oauth_client_info') else {}"
-              substituteInPlace backend/open_webui/utils/oauth.py \
-                --replace-fail \
-                  "    recovered = {**oauth_client_info}" \
-                  "    recovered = {**oauth_client_info}; _wu = str(await Config.get('webui.url') or ''').rstrip('/'); _sid = (connection.get('info') or {}).get('id'); recovered.setdefault('redirect_uris', [f'{_wu}/oauth/clients/mcp:{_sid}/callback'])"
+                  "                    oauth_client_info = resolve_oauth_client_info(tool_server_connection)" \
+                  "                    _oi = tool_server_connection.get('info') or {}; oauth_client_info = (await get_oauth_client_info_with_static_credentials(None, f'mcp:{server_id}', tool_server_connection.get('url'), oauth_client_id=_oi.get('oauth_client_id'), oauth_client_secret=_oi.get('oauth_client_secret'), oauth_scope=_oi.get('oauth_scope'))).model_dump(mode='json') if auth_type == 'oauth_2.1_static' and _oi.get('oauth_client_id') and _oi.get('oauth_client_secret') else resolve_oauth_client_info(tool_server_connection)"
             '';
           });
           root = pkgsOwui.buildEnv {
@@ -155,7 +171,7 @@
       # `originUrl` des OAuth2-Clients in modules/kanidm.nix und mit dem Gateway-Listener
       # in charts/root-app/templates/gateway.yaml übereinstimmen, sonst lehnt kanidm den
       # Login ab. Die drei Stellen wandern immer gemeinsam.
-      webuiOrigin = "https://chat.steinaberfein.de";
+      webuiOrigin = chatSpec.webuiOrigin;
       idmOrigin = "https://idm.mauritiusberger.de";
 
       # Die vier Quellen des k8s-Secrets. `hashFile` hasht den INHALT — nicht den
@@ -213,7 +229,7 @@
       # (modules/bricklink-mcp.nix). Kein Ingress, nur clusterintern.
       sandboxUrl = "http://bricklink-mcp.chat.svc.cluster.local:8888";
 
-      toolServerId = "bricklink";
+      toolServerId = chatSpec.bricklinkToolServerId;
       toolServerUrl = "http://bricklink-mcp.chat.svc.cluster.local:8081/mcp";
       # Die Modelle, die den Tool-Server automatisch aktiv haben sollen, führen ihn in
       # `meta.toolIds`. Die Web-UI wählt daraus beim Modellwechsel die Standard-Tools
@@ -245,11 +261,17 @@
       # dort als Testnutzer steht, kommt durch (aktuell steinaberfeinbl@gmail.com).
       # Freigegebene Scopes: gmail.readonly + gmail.compose. Der MCP bietet damit Lesen,
       # Suchen, Threads, Labels und das Anlegen von Entwürfen — **kein Senden**.
-      gmailToolServerId = "gmail";
-      gmailToolServerUrl = "https://gmailmcp.googleapis.com/mcp/v1";
+      gmailToolServerId = chatSpec.gmailToolServerId;
+      gmailToolServerUrl = chatSpec.gmailToolServerUrl;
       # Client-IDs sind per OAuth-Design öffentlich (sie stehen in jeder Autorisierungs-URL),
       # nur das Secret liegt in agenix. Client: „Open WebUI chat.steinaberfein.de".
-      gmailOauthClientId = "825099451418-3q800m171d09dj9fgflp654smo9vm2mo.apps.googleusercontent.com";
+      gmailOauthClientId = chatSpec.gmailOauthClientId;
+      # Scopes EXPLIZIT. Ohne `oauth_scope` nimmt upstream alle aus der
+      # Protected-Resource-Metadata — die nennt auch `https://mail.google.com/`,
+      # `gmail.modify` und `gmail.metadata`, die unser Zustimmungsbildschirm gar nicht
+      # fuehrt. Eine Autorisierungsanfrage mit nicht konfigurierten Scopes lehnt Google ab.
+      # Diese beiden sind identisch mit denen unter Datenzugriff im Projekt gmail-mcp-507417.
+      gmailOauthScope = chatSpec.gmailOauthScope;
       gmailToolServerToolId = "server:mcp:${gmailToolServerId}";
 
       # ── Modell-Gating für mschuett ───────────────────────────────────────────────
@@ -867,6 +889,19 @@
       };
     in
     {
+      # Drift-Sperre zwischen Config und Test: chatSpec.limitedModelIds ist das, was
+      # modules/chat-e2e.nix für mschuett erwartet. Wird hier ein Modell ergänzt oder
+      # entfernt, ohne die Liste oben nachzuziehen, bricht der Eval — statt dass der
+      # Test später grün eine Vergangenheit bestätigt.
+      assertions = [
+        {
+          assertion =
+            (lib.sort (a: b: a < b) (map (m: m.id) modelGrants.openwebui-limited))
+            == (lib.sort (a: b: a < b) chatSpec.limitedModelIds);
+          message = "modelGrants.openwebui-limited und chatSpec.limitedModelIds sind auseinandergelaufen — beide in modules/openwebui.nix angleichen.";
+        }
+      ];
+
       age.secrets.openwebui-oidc-secret.file = ../secrets/openwebui-oidc-secret.age;
       age.secrets.openwebui-secret-key.file = ../secrets/openwebui-secret-key.age;
       # Dieselbe Datei prüft qdrant serverseitig (modules/qdrant.nix) — eine Quelle,
@@ -963,6 +998,7 @@
                    --arg gmailUrl ${lib.escapeShellArg gmailToolServerUrl} \
                    --arg gmailId ${lib.escapeShellArg gmailToolServerId} \
                    --arg gmailClientId ${lib.escapeShellArg gmailOauthClientId} \
+                   --arg gmailScope ${lib.escapeShellArg gmailOauthScope} \
                    --arg gmailClientSecret "$(cat ${config.age.secrets.gmail-mcp-oauth-secret.path})" '[{
             url: $url,
             path: "",
@@ -992,7 +1028,8 @@
               name: "Gmail",
               description: "Googles offizieller Gmail-MCP. Mails und Threads suchen und lesen, Labels verwalten, Entwürfe anlegen. Kein Senden. Jeder Nutzer meldet sich einmalig mit seinem eigenen Google-Konto an.",
               oauth_client_id: $gmailClientId,
-              oauth_client_secret: $gmailClientSecret
+              oauth_client_secret: $gmailClientSecret,
+              oauth_scope: $gmailScope
             }
           }]' > "$tmp/TOOL_SERVER_CONNECTIONS"
 

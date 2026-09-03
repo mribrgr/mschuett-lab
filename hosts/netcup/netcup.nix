@@ -62,6 +62,7 @@
         self.outputs.modules.nixos.chat-namespace
         self.outputs.modules.nixos.kanidm
         self.outputs.modules.nixos.openwebui
+        self.outputs.modules.nixos.chat-e2e
         # Claude-Max-Abo als OpenAI-Endpoint für OpenWebUI. Kein Ingress, zusätzlich per
         # CiliumNetworkPolicy nur für den open-webui-Pod erreichbar — der Port ist das
         # Abo-Credential.

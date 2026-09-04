@@ -39,6 +39,28 @@ Angelegt am 2026-09-02 im Google-Konto `steinaberfeinbl@gmail.com`:
 Das ist eine bewusst dokumentierte Ausnahme vom Deklarativ-Prinzip: die Google-Cloud-Seite
 ist von hier aus nicht deklarativ erreichbar.
 
+## ⚠️ Testnutzer: der Eintrag, der gern verschwindet
+
+Ohne Eintrag in *Zielgruppe → Testnutzer* endet die Zustimmung in
+
+```
+Fehler 403: access_denied
+„steinaberfein.de" hat die Überprüfung durch Google nicht abgeschlossen.
+Die App wird gerade getestet und nur die vom Entwickler genehmigten Tester haben Zugriff.
+```
+
+Die Falle: im Panel „Nutzer hinzufügen" reicht **ein** Klick auf *Speichern* nicht. Solange
+das Chip-Eingabefeld den Fokus hat, schluckt es den ersten Klick — das Panel bleibt offen,
+die Liste bleibt leer, und es erscheint **keine** Fehlermeldung. Am 2026-09-02 genau so
+passiert und erst am 2026-09-03 beim ersten echten Anmeldeversuch aufgefallen.
+
+**Immer gegenprüfen:** Seite neu laden und schauen, ob unter *OAuth-Nutzerobergrenze*
+tatsächlich „1 Nutzer (1 Testnutzer, 0 andere)" steht und die Mail in der Tabelle auftaucht.
+
+Das kann `chat-e2e` **nicht** abdecken: die Testnutzerliste ist Google-Konto-Zustand, und
+Google bietet dafür keine API. Der e2e-Test prüft nur, dass open-webui korrekt zu Google
+weiterleitet — was hinter dem Redirect passiert, sieht er nicht.
+
 ## Die Redirect-URI mit dem Doppelpunkt
 
 Open WebUI baut sie als `{WEBUI_URL}/oauth/clients/mcp:{id}/callback` (`utils/oauth.py`,

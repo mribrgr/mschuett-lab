@@ -207,6 +207,21 @@
           echo "== chat-e2e: alles grün"
         '';
       };
+
+      heartbeat = pkgs.writeShellScript "chat-e2e-heartbeat" ''
+        set -u
+        # $EXIT_STATUS ist bei Type=oneshot der Rückgabewert von ExecStart:
+        # "0" heißt grün, alles andere rot. Bei einem Signal steht hier der
+        # Signalname — der ist ebenfalls nicht "0" und damit korrekt rot.
+        success=false
+        [ "''${EXIT_STATUS:-1}" = "0" ] && success=true
+
+        # `|| true` fehlt hier absichtlich NICHT im Ergebnis: ExecStopPost darf
+        # den Unit-Status nicht kippen, sonst meldet der Timer einen Fehler,
+        # obwohl der Test selbst grün war.
+        ${pkgs.curl}/bin/curl -sS -m 20           --retry 3 --retry-delay 5 --retry-all-errors           -X POST           -H "Authorization: Bearer $(cat ${config.age.secrets.gatus-token-cluster.path})"           -o /dev/null           "https://status.mauritiusberger.de/api/v1/endpoints/cluster_chat-e2e/external?success=$success"           || echo "chat-e2e: Heartbeat nicht zugestellt" >&2
+        exit 0
+      '';
     in
     {
       systemd.services.chat-e2e = lib.mkIf (config.services.k3s.role == "server") {
@@ -218,6 +233,14 @@
         serviceConfig = {
           Type = "oneshot";
           ExecStart = lib.getExe script;
+          # Heartbeat an Gatus, egal wie der Lauf ausging. ExecStopPost statt
+          # eines Anhängsels im Skript: systemd setzt hier $EXIT_STATUS, und der
+          # Push passiert damit auch dann, wenn der Test mitten im Lauf stirbt.
+          #
+          # Warum das den Test aufwertet: bisher fiel ein DAUERHAFT roter
+          # chat-e2e nur auf, wenn jemand ins Journal sah. Jetzt ist sowohl das
+          # rote Ergebnis als auch das AUSBLEIBEN des Laufs eine Meldung.
+          ExecStopPost = "${heartbeat}";
         };
       };
 

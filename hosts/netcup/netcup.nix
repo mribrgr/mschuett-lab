@@ -86,6 +86,7 @@
         # Chart-Repo (velero ist dort Chart-Abhängigkeit) — Begründung im Modulkopf.
         # Design: nix-config/docs/superpowers/specs/2026-08-26-velero-nas-mirror-design.md
         self.outputs.modules.nixos.backup-store
+        self.outputs.modules.nixos.gatus # Status-Seite + Heartbeat-Empfänger
       ];
 
       nixpkgs.hostPlatform = "aarch64-linux";

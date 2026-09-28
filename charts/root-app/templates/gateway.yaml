@@ -165,3 +165,25 @@ spec:
       allowedRoutes:
         namespaces:
           from: All
+
+    # ── status.mauritiusberger.de (Gatus, Namespace `monitoring`) ─────────────
+    # Die HTTPRoute dazu kommt aus dem Flake (modules/gatus.nix), dieser Listener
+    # über ArgoCD — zwei Quellen, zwei Zeitpunkte. Reihenfolge: erst der
+    # Listener, sonst hängt die Route ins Leere und Gatus ist nicht erreichbar.
+    #
+    # DNS braucht es dafür nicht: bei netcup steht ein Wildcard
+    # *.mauritiusberger.de → 152.53.15.24, jeder neue Subdomain löst also sofort
+    # auf (2026-09-28 gegen einen erfundenen Namen geprüft). Deshalb kam auch
+    # idm. ohne eigenen Record aus. Ein external-dns-Controller wäre hier
+    # Aufwand ohne Ertrag — die Gateway API selbst kennt kein DNS.
+    - name: https-status
+      protocol: HTTPS
+      port: 443
+      hostname: status.mauritiusberger.de
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: status-mauritiusberger-de-tls
+      allowedRoutes:
+        namespaces:
+          from: All

@@ -178,4 +178,24 @@ in
   # verschlüsseln, deployen — open-webui startet dabei neu (secretsChecksum), sonst
   # spricht es Google mit dem alten Secret an und jeder Tool-Aufruf endet in invalid_client.
   "gmail-mcp-oauth-secret.age".publicKeys = all ++ [ netcup ];
+
+  # ── Gatus (modules/gatus.nix) ──────────────────────────────────────────────
+  # gatus-oidc-secret: Client-Secret des kanidm-OAuth2-Clients "gatus". EINE
+  # Quelle, zwei Konsumenten — Gatus zeigt es vor, kanidm-provision setzt es.
+  # Erzeugen: `openssl rand -base64 32`.
+  "gatus-oidc-secret.age".publicKeys = all ++ [ netcup ];
+
+  # gatus-ntfy-topic: derselbe ntfy-Topic, über den der NAS seinen Tagesbericht
+  # schickt (nix-config/base/secrets/ntfy-nas-topic.age). Bewusst derselbe
+  # Kanal: ein zweiter würde nie geprüft und verrottete still.
+  "gatus-ntfy-topic.age".publicKeys = all ++ [ netcup ];
+
+  # Push-Tokens der Heartbeat-Clients, getrennt nach Herkunft. Ein gemeinsames
+  # Token wäre bequemer, aber wer es abgreift, kann JEDEN Ausfall verdecken,
+  # indem er success=true schickt — genau das, wogegen ein Totmann gebaut ist.
+  # Je Standort eines begrenzt den Schaden auf dessen Heartbeats.
+  # Erzeugen: `openssl rand -hex 32`.
+  "gatus-token-nas.age".publicKeys = all ++ [ netcup ];
+  "gatus-token-mac.age".publicKeys = all ++ [ netcup ];
+  "gatus-token-cluster.age".publicKeys = all ++ [ netcup ];
 }

@@ -173,7 +173,13 @@
       # getrennt zu pflegen wäre eine Drift-Falle ohne Fehlermeldung. Das NixOS-Modul
       # macht es genauso (`config.members` aus `cfg.provision.persons`).
       personGroups = {
-        mberger = [ "openwebui-admins" ];
+        mberger = [
+          "openwebui-admins"
+          # Status-Seite (modules/gatus.nix). Bewusst nur mberger: die Seite
+          # zeigt jeden Dienst und jeden Ausfall, das ist Betriebs- und keine
+          # Nutzersicht. Max dazunehmen ist eine Zeile, wenn er sie braucht.
+          "gatus-users"
+        ];
         mschuett = [
           "openwebui-users"
           # Eingeschränkte Modell-Auswahl. Welche Modelle das sind, steht in
@@ -186,6 +192,7 @@
         "openwebui-admins"
         "openwebui-users"
         "openwebui-limited"
+        "gatus-users"
       ];
 
       membersOf = group: lib.attrNames (lib.filterAttrs (_: groups: lib.elem group groups) personGroups);
@@ -204,6 +211,22 @@
             mailAddresses = [ "steinaberfeinbl@gmail.com" ];
           };
         };
+        # Status-Seite (modules/gatus.nix). Eigener Client statt eines geteilten:
+        # ein kompromittiertes Secret darf nicht zugleich den Chat aufmachen.
+        systems.oauth2.gatus = {
+          displayName = "Gatus";
+          originUrl = "https://status.mauritiusberger.de/authorization-code/callback";
+          originLanding = "https://status.mauritiusberger.de/";
+          preferShortUsername = true;
+          # Dieselbe agenix-Datei, die auch das Secret in Namespace `monitoring`
+          # speist — hier über eine zweite Kopie in `chat`, weil k8s-Secrets
+          # namespace-gebunden sind und kanidm in `chat` läuft, Gatus aber nicht.
+          # Gerendert von systemd `gatus-secrets` (modules/gatus.nix).
+          basicSecretFile = "/secrets-gatus/oidc-client-secret";
+          # Gatus fragt nur `openid` an und wertet allein das Subject aus.
+          scopeMaps.gatus-users = [ "openid" ];
+        };
+
         systems.oauth2.open-webui = {
           displayName = "Open WebUI";
           originUrl = "${chatOrigin}/oauth/oidc/callback";
@@ -376,6 +399,20 @@
                       configMap.name = "kanidm-config";
                     }
                     {
+                      # Client-Secret des gatus-OAuth2-Clients. Eigenes Secret,
+                      # eigener Mount — gerendert von modules/gatus.nix.
+                      name = "gatus-oidc-secret";
+                      secret = {
+                        secretName = "gatus-oidc";
+                        items = [
+                          {
+                            key = "oidc-client-secret";
+                            path = "oidc-client-secret";
+                          }
+                        ];
+                      };
+                    }
+                    {
                       # Nur der eine Key aus dem von modules/openwebui.nix gerenderten
                       # Secret — kanidm hat keinen Grund, die LLM-Keys zu sehen.
                       name = "oidc-secret";
@@ -546,6 +583,10 @@
                         {
                           name = "config";
                           mountPath = "/config";
+                        }
+                        {
+                          name = "gatus-oidc-secret";
+                          mountPath = "/secrets-gatus";
                         }
                         {
                           name = "oidc-secret";

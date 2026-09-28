@@ -20,9 +20,14 @@ let
     # unten per assertion abgesichert — driftet eines von beiden, bricht der Eval.
     limitedModelIds = [
       "~deepseek/deepseek-v4-flash-latest"
-      "claude-opus-5"
       "collana.general"
     ];
+    # Modelle, deren DB-Eintrag der Gating-Sidecar aktiv LÖSCHT (siehe
+    # modelRevocations unten). Dass sie danach für mschuett weg sind, prüft der
+    # e2e-Test implizit mit: er vergleicht die sichtbare Liste EXAKT gegen
+    # limitedModelIds. Dass keine ID in beiden Listen steht, sichert eine
+    # assertion ab.
+    revokedModelIds = [ "claude-opus-5" ];
   };
 in
 {
@@ -317,17 +322,16 @@ in
               gmailToolServerToolId
             ];
           }
-          {
-            # Aus dem Claude-Max-Abo über meridian. Bewusst NUR dieses eine Claude-Modell.
-            # Vision am 2026-08-27 mit einem echten Bild verifiziert (rotes PNG → „Rot").
-            id = "claude-opus-5";
-            name = "Claude Opus 5";
-            vision = true;
-            tools = [
-              toolServerToolId
-              gmailToolServerToolId
-            ];
-          }
+          # claude-opus-5 stand hier bis 2026-09-11 („Aus dem Claude-Max-Abo über
+          # meridian", Vision am 2026-08-27 mit einem echten Bild verifiziert).
+          # ENTFERNT, weil meridian dieses Modell aus DEMSELBEN Claude-Max-Abo
+          # bedient, aus dem auch Claude Code auf dem Mac läuft: jeder Chat hier
+          # verbraucht dort Session-Limit. Dazu kommt, dass OpenWebUI ohne
+          # TASK_MODEL Titel-, Tag- und Query-Generierung sowie das
+          # Memory-Review (MEMORIES_REVIEW_INTERVAL_TURNS = 1) auf dem CHAT-Modell
+          # fährt — pro Antwort also mehrere zusätzliche Abo-Aufrufe.
+          # Der DB-Eintrag wird nicht nur nicht mehr gesetzt, sondern über
+          # modelRevocations aktiv gelöscht (Weglassen allein widerruft NICHTS).
           {
             # collana, mit prefix_id aus OPENAI_API_CONFIGS. Vision ebenfalls verifiziert
             # (beschrieb das Testbild korrekt als einheitlich rot).
@@ -341,6 +345,20 @@ in
           }
         ];
       };
+
+      # ── Widerruf ────────────────────────────────────────────────────────────────
+      # Ein Modell aus modelGrants zu STREICHEN widerruft nichts: der Sidecar fasst
+      # nur an, was in der Spec steht, der alte DB-Eintrag mit seinen Grants bleibt
+      # liegen und der Nicht-Admin sieht das Modell weiter. Deshalb diese Liste —
+      # sie löscht den DB-Eintrag. Danach greift wieder der Default aus
+      # `get_filtered_models` (utils/models.py, an der Instanz nachgelesen): ein
+      # Modell OHNE DB-Eintrag landet nie in `filtered_models`, ist also nur noch
+      # für Admins sichtbar.
+      #
+      # Bleibt dauerhaft stehen: die Datenbank überlebt jeden Deploy, und ein
+      # späteres `/api/v1/models/model/update` (Admin klickt in der UI) legt den
+      # Eintrag sofort wieder an. Der Lauf ist idempotent (404/401 = nichts zu tun).
+      modelRevocations = chatSpec.revokedModelIds;
 
       # ── Deutscher Opus-5-System-Prompt ──────────────────────────────────────────
       # Übersetzung der inhaltlichen Abschnitte des von Anthropic veröffentlichten
@@ -623,6 +641,23 @@ in
           fi
         done
 
+        # Widerruf (modelRevocations): den DB-Eintrag löschen, nicht bloß die Grants
+        # leeren. `/model/delete` nimmt {"id": …} im Body und antwortet 401, wenn es
+        # den Eintrag nicht (mehr) gibt — das ist der Soll-Zustand, kein Fehler.
+        # Läuft NACH der Grant-Schleife, damit ein Modell, das versehentlich in
+        # beiden Listen steht, am Ende widerrufen ist und nicht sichtbar bleibt.
+        for mid in ${lib.escapeShellArgs modelRevocations}; do
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "$AUTH" \
+                   -H 'Content-Type: application/json' \
+                   -d "$(jq -nc --arg id "$mid" '{id: $id}')" \
+                   "$API/api/v1/models/model/delete")
+          case "$code" in
+            200) echo "revoke ok: $mid — DB-Eintrag gelöscht, damit nur noch für Admins sichtbar" ;;
+            401|404) echo "revoke: $mid hat keinen DB-Eintrag (Soll-Zustand)" ;;
+            *) echo "revoke FEHLGESCHLAGEN für $mid (HTTP $code)" >&2 ;;
+          esac
+        done
+
         exec sleep infinity
       '';
 
@@ -899,6 +934,14 @@ in
             (lib.sort (a: b: a < b) (map (m: m.id) modelGrants.openwebui-limited))
             == (lib.sort (a: b: a < b) chatSpec.limitedModelIds);
           message = "modelGrants.openwebui-limited und chatSpec.limitedModelIds sind auseinandergelaufen — beide in modules/openwebui.nix angleichen.";
+        }
+        {
+          # Ein Modell gleichzeitig granten und widerrufen wäre kein Kompromiss,
+          # sondern ein Wechselbad: der Sidecar setzt es bei jedem Pod-Start erst
+          # sichtbar und löscht es dann wieder.
+          assertion =
+            lib.intersectLists modelRevocations (map (m: m.id) modelGrants.openwebui-limited) == [ ];
+          message = "chatSpec.revokedModelIds und modelGrants.openwebui-limited überschneiden sich — ein widerrufenes Modell darf keinen Grant haben.";
         }
       ];
 

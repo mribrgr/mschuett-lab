@@ -120,6 +120,10 @@
             topic: ''${GATUS_NTFY_TOPIC}
             url: https://ntfy.sh
             priority: 4
+            # ⚠️ default-alert liefert NUR Voreinstellungen für Alerts, die am
+            # Endpoint deklariert sind (config/config.go: Merge über ep.Alerts).
+            # Ohne `alerts:` am Endpoint alarmiert Gatus NIE — so lief es vom
+            # 28. auf den 29.09.: sechs rote NAS-Heartbeats, keine Meldung.
             default-alert:
               enabled: true
               # 2/2 statt 1/1: ein einzelner verlorener Request um 3 Uhr nachts
@@ -142,6 +146,8 @@
               - "[STATUS] == 200"
               - "[RESPONSE_TIME] < 3000"
               - "[CERTIFICATE_EXPIRATION] > 240h"
+            alerts:
+              - type: ntfy
 
           - name: kanidm
             group: public
@@ -150,6 +156,8 @@
             conditions:
               - "[STATUS] == 200"
               - "[CERTIFICATE_EXPIRATION] > 240h"
+            alerts:
+              - type: ntfy
 
           - name: steinaberfein.de
             group: public
@@ -158,6 +166,8 @@
             conditions:
               - "[STATUS] < 400"
               - "[CERTIFICATE_EXPIRATION] > 240h"
+            alerts:
+              - type: ntfy
 
         # ── Totmann-Schalter ──────────────────────────────────────────────────
         # Kein Poller kommt hier heran: der NAS steht hinter einem Speedport
@@ -170,6 +180,17 @@
         # Intervall = Push-Takt plus großzügiger Puffer. Zu knapp gewählt heißt
         # Fehlalarm bei jedem verpassten Lauf, und ein Wächter, dem man nicht
         # glaubt, ist keiner.
+        #
+        # failure-threshold 1 bei reinen Heartbeats, aus zwei Gründen:
+        #   • Ein Fehler heißt hier schon „ein ganzes Intervall kein Push“ —
+        #     beim NAS drei verpasste Pushes. Das Argument „ein verlorener
+        #     Request ist kein Ausfall“ ist im Intervall bereits eingepreist.
+        #   • Gatus schreibt nur JEDES ZWEITE Intervall einen Fehler: beim
+        #     nächsten Tick zählt sein eigenes Fehlerergebnis als „Ergebnis
+        #     innerhalb des Intervalls“ (watchdog/external_endpoint.go,
+        #     HasEndpointStatusNewerThan). Mit Schwelle 2 käme der NAS-Alarm
+        #     erst nach ~2¼ h, der restic-Alarm erst nach bis zu 90 h.
+        # Effektiv alarmiert Gatus damit nach 1–2 Intervallen Stille.
         external-endpoints:
           # Push alle 15 min aus einem systemd-Timer auf dem NAS.
           - name: nas
@@ -177,6 +198,10 @@
             token: ''${GATUS_TOKEN_NAS}
             heartbeat:
               interval: 45m
+            alerts:
+              - type: ntfy
+                failure-threshold: 1
+                description: "NAS meldet sich nicht (Push alle 15 min)"
 
           # Die beiden restic-Ziele des Macs, gepusht vom Wrapper in
           # nix-config/base/modules/restic.nix — success=true nur bei rc=0.
@@ -187,12 +212,20 @@
             token: ''${GATUS_TOKEN_MAC}
             heartbeat:
               interval: 30h
+            alerts:
+              - type: ntfy
+                failure-threshold: 1
+                description: "restic-Backup Mac → NAS ausgeblieben oder fehlgeschlagen"
 
           - name: restic-azure
             group: backup
             token: ''${GATUS_TOKEN_MAC}
             heartbeat:
               interval: 30h
+            alerts:
+              - type: ntfy
+                failure-threshold: 1
+                description: "restic-Backup Mac → Azure ausgeblieben oder fehlgeschlagen"
 
           # chat-e2e läuft per systemd-Timer auf netcup alle 15 min
           # (modules/chat-e2e.nix). Der Heartbeat macht aus dem Test einen
@@ -203,6 +236,12 @@
             token: ''${GATUS_TOKEN_CLUSTER}
             heartbeat:
               interval: 45m
+            # Schwelle bleibt beim Default 2: hier kommen auch gepushte ROTE
+            # Testläufe an (success=false alle 15 min), und ein einzelner
+            # wackliger Lauf soll nicht aufs Handy.
+            alerts:
+              - type: ntfy
+                description: "chat-e2e rot oder ausgeblieben"
 
           # velero fehlt hier bewusst: sein Schedule steht im Chart-Repo, nicht
           # in diesem Flake. Erst den Takt festnageln, dann den Heartbeat — ein

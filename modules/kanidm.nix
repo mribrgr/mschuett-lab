@@ -225,6 +225,15 @@
           basicSecretFile = "/secrets-gatus/oidc-client-secret";
           # Gatus fragt nur `openid` an und wertet allein das Subject aus.
           scopeMaps.gatus-users = [ "openid" ];
+          # Gatus 5.36 schickt KEIN PKCE (security/oidc.go: AuthCodeURL nur mit
+          # state + nonce, keine Option dafür), kanidm erzwingt es aber per
+          # Default → Login endet in „InvalidState“, im Log „No PKCE code
+          # challenge was provided with client in enforced PKCE mode“ (am
+          # 2026-09-29 live gesehen). Bewusst abgeschaltet (Entscheidung
+          # 2026-09-29, Alternativen waren Basic-Auth oder oauth2-proxy):
+          # gatus ist ein vertraulicher Client mit eigenem Secret, state und
+          # nonce prüft Gatus selbst. Zurücknehmen, sobald Gatus PKCE kann.
+          allowInsecureClientDisablePkce = true;
         };
 
         systems.oauth2.open-webui = {

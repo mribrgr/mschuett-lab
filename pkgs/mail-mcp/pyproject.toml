@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mail-mcp"
+version = "0.1.0"
+description = "MCP-Server für EIN Postfach über IMAP/SMTP (App-Passwort), anbieterneutral"
+requires-python = ">=3.12"
+# Bewusst nur fastmcp: IMAP und SMTP kommen aus der Standardbibliothek. Ein
+# Mail-Client, der Vollzugriff auf ein Postfach hat, soll so wenig fremden Code
+# wie möglich ausführen.
+dependencies = [
+  "fastmcp",
+]
+
+[project.scripts]
+mail-mcp = "mail_mcp.server:main"
+
+[tool.setuptools.packages.find]
+include = ["mail_mcp*"]

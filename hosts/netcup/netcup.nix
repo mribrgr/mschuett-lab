@@ -78,6 +78,9 @@
         # die netcup-IP und den 30-Tage-Web-Token für den Katalog-Export.
         # Details im Modulkopf und in docs/bricklink-mcp.md.
         self.outputs.modules.nixos.bricklink-mcp
+        # Mail-Postfächer (aktuell Max' AOL) als MCP über IMAP + App-Passwort. Gleiches
+        # Muster: kein Ingress, CNP nur für open-webui, Bearer-Token. docs/mail-mcp.md.
+        self.outputs.modules.nixos.mail-mcp
 
         # ── Zwischenlager des velero-Mirrors aufs NAS ──────────────────────────
         # Garage-Pod in Namespace `backup-store` plus der Nur-Forwarding-User

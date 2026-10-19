@@ -36,12 +36,52 @@
     }:
     let
       spec = self.chat;
-      gmailClientKey = "mcp:${spec.gmailToolServerId}";
-      gmailRedirectUri = "${spec.webuiOrigin}/oauth/clients/${gmailClientKey}/callback";
+      mailSlugs = lib.attrNames self.mailMcp.mailboxes;
+      mailUrl = slug: "http://${slug}-mail-mcp.chat.svc.cluster.local:${toString self.mailMcp.port}/mcp";
+      githubRedirectUri = "${spec.webuiOrigin}/oauth/clients/mcp:${spec.githubToolServerId}/callback";
       expectedTools = [
         "server:mcp:${spec.bricklinkToolServerId}"
-        "server:mcp:${spec.gmailToolServerId}"
-      ];
+      ]
+      ++ map (s: "server:mcp:${s}") mailSlugs;
+
+      # Echter MCP-Aufruf gegen einen Mail-MCP, ausgeführt IM open-webui-Pod (nur der
+      # darf laut CNP hinein). Kommt per stdin in den Pod, samt Bearer in der ersten
+      # Zeile — so steht der Token weder in argv auf dem Host noch im Pod.
+      # Ruft list_folders, also ein echtes IMAP-LOGIN: fällt auf, wenn das
+      # App-Passwort widerrufen wurde. 96 Logins am Tag sind weniger als jedes
+      # Mailprogramm mit Abruf alle 5 Minuten.
+      #
+      # Timeouts wie open-webui 0.11 beim echten Chat, damit der Test genau dann rot wird,
+      # wenn auch der Nutzer einen Fehler sähe — nicht früher, nicht später:
+      #   * initialize: MCP_INITIALIZE_TIMEOUT, Default 10 s (bei uns nicht gesetzt)
+      #   * tools/call: das MCP-SDK baut httpx.Timeout(30, read=300); ein Gesamtlimit für
+      #     Tool-Aufrufe hat open-webui nicht (middleware.py, `result = await function(…)`).
+      #     Bricht der MCP vorher selbst ab, landet seine Meldung als Tool-Ergebnis beim
+      #     Modell — genau das, was diese Probe dann auch meldet.
+      mailProbe = pkgs.writeText "mail-mcp-probe.sh" ''
+        set -u
+        URL=$1
+        TOOL=$2
+        H=(-H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json'
+           -H 'Accept: application/json, text/event-stream')
+        # Streamable HTTP antwortet je nach Server als JSON oder als SSE (`data: {…}`).
+        body() { sed -n 's/^data: //p; /^{/p' | tail -1; }
+        hdr=$(mktemp)
+        curl -s -D "$hdr" -o /dev/null --max-time 10 "''${H[@]}" \
+          -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"chat-e2e","version":"1"}}}' \
+          "$URL"
+        sid=$(grep -i '^mcp-session-id:' "$hdr" | cut -d' ' -f2 | tr -d '\r')
+        if [ -z "$sid" ]; then echo "initialize ohne Mcp-Session-Id"; exit 0; fi
+        curl -s -o /dev/null --max-time 10 "''${H[@]}" -H "Mcp-Session-Id: $sid" \
+          -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' "$URL"
+        curl -s --connect-timeout 30 --max-time 300 "''${H[@]}" -H "Mcp-Session-Id: $sid" \
+          -d "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"$TOOL\",\"arguments\":{}}}" \
+          "$URL" | body | jq -r '
+            if .result.isError then "Tool-Fehler: " + (.result.content[0].text // "?")
+            elif .error then "JSON-RPC-Fehler: " + (.error.message // "?")
+            else ((.result.structuredContent // (.result.content[0].text | fromjson)).folders | length | tostring)
+            end' 2>/dev/null || echo "unlesbare Antwort"
+      '';
 
       script = pkgs.writeShellApplication {
         name = "chat-e2e";
@@ -67,7 +107,9 @@
           echo "== chat-e2e gegen $ORIGIN"
 
           # ── 1. Alle Deployments im Namespace chat sind vollständig ready ──────────
-          for d in open-webui kanidm bricklink-mcp qdrant searxng meridian; do
+          for d in open-webui kanidm bricklink-mcp qdrant searxng meridian ${
+            lib.concatMapStringsSep " " (s: "${s}-mail-mcp") mailSlugs
+          }; do
             want=$(k3s kubectl -n chat get deploy "$d" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
             have=$(k3s kubectl -n chat get deploy "$d" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)
             if [ -n "$want" ] && [ "$want" = "''${have:-0}" ]; then
@@ -145,7 +187,7 @@
             fail "Modelle weichen ab — ist: [$got] soll: [$want]"
           fi
 
-          # ── 7. Beide MCP-Tool-Server sichtbar ─────────────────────────────────────
+          # ── 7. Alle MCP-Tool-Server sichtbar ──────────────────────────────────────
           tools=$(curl -sf --max-time 20 -H "$AUTH" "$ORIGIN/api/v1/tools/" | jq -r '.[].id' | sort | tr '\n' ' ' || true)
           for t in ${lib.escapeShellArgs expectedTools}; do
             case " $tools " in
@@ -154,42 +196,46 @@
             esac
           done
 
-          # ── 8. Gmail-OAuth ist tatsächlich anklickbar ─────────────────────────────
-          # Der eigentliche Regressionsschutz. Beim Start registriert open-webui den
-          # statischen OAuth-Client; scheitert das, kostet es nur eine Logzeile — und der
-          # Endpunkt antwortet dann 400 ("authorization endpoint could not be resolved")
-          # oder 404. Geprüft wird nicht nur der 302, sondern auch WOHIN: client_id,
-          # redirect_uri und Scopes müssen zu dem passen, was im Google-Client hinterlegt
-          # ist. Eine falsche redirect_uri fällt sonst erst beim Nutzer auf, als
-          # redirect_uri_mismatch.
-          loc=$(curl -s --max-time 20 -o /dev/null -w '%{redirect_url}' \
-                  -H "$AUTH" "$ORIGIN/oauth/clients/mcp%3A${spec.gmailToolServerId}/authorize" || true)
-          if [ -z "$loc" ]; then
-            fail "Gmail-Authorize liefert keinen Redirect (Client beim Start nicht registriert?)"
+          # ── 7b. GitHub ist NUR für Admins: der Nicht-Admin darf ihn NICHT sehen ──
+          # access_grants = [ ] heißt „privat, nur Admin". Taucht er hier auf, ist die
+          # Beschränkung weg — und mschuett käme an mbergers GitHub-Anbindung.
+          case " $tools " in
+            *" server:mcp:${spec.githubToolServerId} "*) fail "GitHub-MCP für den Nicht-Admin sichtbar (soll: nur Admin)" ;;
+            *) pass "GitHub-MCP für den Nicht-Admin unsichtbar" ;;
+          esac
+
+          # ── 7c. GitHub-OAuth als Admin anklickbar ─────────────────────────────────
+          # Gleiches Muster wie früher bei Gmail: der statische Client wird beim Start
+          # registriert (open-webui-Patch für #20697); scheitert das, kostet es nur eine
+          # Logzeile und der Authorize-Endpunkt antwortet 400/404.
+          arow=$(k3s kubectl -n chat exec deploy/open-webui -c open-webui -- \
+                   sqlite3 /data/webui.db \
+                   "select id from user where email='${spec.adminUserEmail}' and role='admin' limit 1;" 2>/dev/null || true)
+          if [ -z "$arow" ]; then
+            fail "kein Admin-Konto ${spec.adminUserEmail}"
           else
+            apl=$(printf '{"id":"%s"}' "$arow" | b64url)
+            asig=$(printf '%s.%s' "$hdr" "$apl" | openssl dgst -binary -sha256 -hmac "$secret" | b64url)
+            loc=$(curl -s --max-time 20 -o /dev/null -w '%{redirect_url}' \
+                    -H "Authorization: Bearer $hdr.$apl.$asig" \
+                    "$ORIGIN/oauth/clients/mcp%3A${spec.githubToolServerId}/authorize" || true)
             case "$loc" in
-              https://accounts.google.com/*) pass "Gmail-Authorize leitet zu accounts.google.com" ;;
-              *) fail "Gmail-Authorize leitet nach $loc" ;;
+              https://github.com/login/oauth/authorize*) pass "GitHub-Authorize leitet zu github.com" ;;
+              "") fail "GitHub-Authorize liefert keinen Redirect (Client beim Start nicht registriert?)" ;;
+              *) fail "GitHub-Authorize leitet nach $loc" ;;
             esac
             case "$loc" in
-              *"client_id=${spec.gmailOauthClientId}"*) pass "client_id korrekt" ;;
-              *) fail "client_id fehlt oder falsch im Redirect" ;;
+              *"client_id=${spec.githubOauthClientId}"*) pass "GitHub client_id korrekt" ;;
+              *) fail "GitHub client_id fehlt oder falsch im Redirect" ;;
             esac
-            enc_redirect=$(printf '%s' ${lib.escapeShellArg gmailRedirectUri} | jq -sRr @uri)
+            enc_redirect=$(printf '%s' ${lib.escapeShellArg githubRedirectUri} | jq -sRr @uri)
             case "$loc" in
-              *"redirect_uri=$enc_redirect"*) pass "redirect_uri korrekt" ;;
-              *) fail "redirect_uri weicht ab — erwartet ${gmailRedirectUri}" ;;
+              *"redirect_uri=$enc_redirect"*) pass "GitHub redirect_uri korrekt" ;;
+              *) fail "GitHub redirect_uri weicht ab — erwartet ${githubRedirectUri}" ;;
             esac
-            for sc in ${lib.escapeShellArgs (lib.splitString " " spec.gmailOauthScope)}; do
-              enc_scope=$(printf '%s' "$sc" | jq -sRr @uri)
-              case "$loc" in
-                *"$enc_scope"*) pass "Scope $sc angefragt" ;;
-                *) fail "Scope $sc fehlt im Redirect" ;;
-              esac
-            done
           fi
 
-          # ── 9. BrickLink-MCP ist oben UND verschlossen ────────────────────────────
+          # ── 8. BrickLink-MCP ist oben UND verschlossen ────────────────────────────
           # Ohne Bearer muss er ablehnen. Ein 200 hier hiesse, der Token-Schutz ist weg.
           bl=$(k3s kubectl -n chat exec deploy/open-webui -c open-webui -- \
                  curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
@@ -199,6 +245,32 @@
             000) fail "BrickLink-MCP nicht erreichbar" ;;
             *) fail "BrickLink-MCP antwortet $bl ohne Bearer (erwartet 401/403)" ;;
           esac
+
+          # ── 9. Mail-MCPs: verschlossen ohne Bearer, Postfach-Login mit Bearer ─────
+          ${lib.concatMapStrings (slug: ''
+            code=$(k3s kubectl -n chat exec deploy/open-webui -c open-webui -- \
+                     curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+                     ${lib.escapeShellArg (mailUrl slug)} 2>/dev/null || true)
+            # curl schreibt bei Verbindungsfehler selbst „000" — ein `|| echo 000`
+            # ergäbe „000000" und träfe den Zweig unten nie.
+            code=''${code:-000}
+            case "$code" in
+              401 | 403) pass "Mail-MCP ${slug} erreichbar und verschlossen ($code)" ;;
+              000) fail "Mail-MCP ${slug} nicht erreichbar" ;;
+              *) fail "Mail-MCP ${slug} antwortet $code ohne Bearer (erwartet 401/403)" ;;
+            esac
+            # Dauer mit ausgeben: das ist die Wartezeit, die ein Nutzer im Chat für
+            # einen Postfach-Aufruf mindestens hat (Gmail ~20 s, AOL ~2 s).
+            t0=$SECONDS
+            res=$({ printf 'TOKEN=%q\n' "$(cat ${config.age.secrets.mail-mcp-bearer.path})"; cat ${mailProbe}; } \
+                    | k3s kubectl -n chat exec -i deploy/open-webui -c open-webui -- \
+                        bash -s -- ${lib.escapeShellArg (mailUrl slug)} list_folders 2>&1 | tail -1)
+            dt=$((SECONDS - t0))
+            case "$res" in
+              [1-9]*) pass "Mail-MCP ${slug}: IMAP-Login ok, $res Ordner in $dt s" ;;
+              *) fail "Mail-MCP ${slug}: Postfach nicht lesbar nach $dt s — $res" ;;
+            esac
+          '') mailSlugs}
 
           if [ "$fails" -gt 0 ]; then
             echo "== chat-e2e: $fails Fehler" >&2

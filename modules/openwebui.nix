@@ -8,10 +8,14 @@ let
   chatSpec = {
     webuiOrigin = "https://chat.steinaberfein.de";
     bricklinkToolServerId = "bricklink";
-    gmailToolServerId = "gmail";
-    gmailToolServerUrl = "https://gmailmcp.googleapis.com/mcp/v1";
-    gmailOauthClientId = "825099451418-3q800m171d09dj9fgflp654smo9vm2mo.apps.googleusercontent.com";
-    gmailOauthScope = "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose";
+    # GitHubs offizieller, remote gehosteter MCP mit OAuth pro Nutzer — NUR für Admins
+    # (mberger). Statischer OAuth-Client, weil GitHub keine dynamische Registrierung kann.
+    githubToolServerId = "github";
+    githubToolServerUrl = "https://api.githubcopilot.com/mcp/";
+    githubOauthClientId = "Ov23li6ZXD0UZK3k3eOV";
+    githubOauthScope = "repo read:org read:user user:email notifications gist";
+    # Der Admin, gegen den chat-e2e den GitHub-OAuth-Redirect prüft.
+    adminUserEmail = "mauritius.berger@develappers.de";
     # Der Nicht-Admin, gegen den die e2e-Tests die Sichtbarkeit prüfen. Über die Mail
     # statt über die User-ID: die entsteht erst beim ersten SSO-Login und darf im Repo
     # nicht geraten werden.
@@ -65,6 +69,9 @@ in
           # der Client warnt beim Verbinden nur über die Versionsdifferenz.
           openWebui = pkgsOwui.open-webui.overridePythonAttrs (old: {
             dependencies = (old.dependencies or [ ]) ++ [ pkgsOwui.python3Packages.qdrant-client ];
+            # Gebraucht für den GitHub-MCP (statischer OAuth-Client, siehe unten). Vom
+            # 2026-10-13 bis 2026-10-16 kurz entfernt, als Gmail auf IMAP umzog.
+            #
             # Upstream-Bug (open-webui#20697): ein per TOOL_SERVER_CONNECTIONS deklarierter
             # MCP-Server mit `auth_type = "oauth_2.1_static"` laesst sich beim Start NICHT
             # registrieren. `initialize_runtime_config` (main.py:586) ruft
@@ -73,7 +80,7 @@ in
             # schreibt. Mit ENABLE_PERSISTENT_CONFIG=False liest `Config.get` ausschliesslich
             # die Env, der Blob kann also per Definition nie existieren. `decrypt_data("")`
             # wirft dann `InvalidToken`, deren str() leer ist — daher die nichtssagende
-            # Logzeile "Error adding OAuth client for MCP tool server gmail:".
+            # Logzeile "Error adding OAuth client for MCP tool server github:".
             #
             # Der Patch ruft fuer den statischen Fall stattdessen upstreams EIGENE Funktion
             # `get_oauth_client_info_with_static_credentials` — exakt das, was
@@ -196,10 +203,12 @@ in
         # Rotiert das Kernel-Token, muss open-webui neu starten — es liest es beim
         # Containerstart aus dem Secret.
         ../secrets/bricklink-sandbox-token.age
-        # Client-Secret des Google-OAuth-Clients für den Gmail-MCP. Gleiche Logik wie beim
-        # BrickLink-Bearer: es steckt in TOOL_SERVER_CONNECTIONS, also muss open-webui nach
-        # einer Rotation neu starten — sonst spricht es Google mit dem alten Secret an.
-        ../secrets/gmail-mcp-oauth-secret.age
+        # Client-Secret der GitHub-OAuth-App für den GitHub-MCP. Steckt in
+        # TOOL_SERVER_CONNECTIONS — nach einer Rotation muss open-webui neu starten.
+        ../secrets/github-mcp-oauth-secret.age
+        # Bearer der Mail-MCPs (modules/mail-mcp.nix) — steckt ebenfalls in
+        # TOOL_SERVER_CONNECTIONS, gleiche Logik wie beim BrickLink-Bearer.
+        ../secrets/mail-mcp-bearer.age
       ];
       secretsChecksum = builtins.hashString "sha256" (
         builtins.concatStringsSep ":" (map (f: builtins.hashFile "sha256" f) secretFiles)
@@ -241,43 +250,52 @@ in
       # (Chat.svelte: „Set Default Tools"), ohne dass jemand etwas anklicken muss.
       toolServerToolId = "server:mcp:${toolServerId}";
 
-      # ── Gmail: Googles OFFIZIELLER, remote gehosteter MCP ───────────────────────
-      # Kein selbst gebauter Server wie bricklink-mcp, sondern gmailmcp.googleapis.com.
-      # Deshalb auch kein Bearer-Token, sondern OAuth 2.0 pro Nutzer:
+      # ── Gmail ───────────────────────────────────────────────────────────────────
+      # Bis 2026-10-13 hing hier Googles OFFIZIELLER MCP (gmailmcp.googleapis.com, OAuth pro
+      # Nutzer). Er ist bis heute nur „Developer Preview", und das Programm nimmt nur
+      # Google-WORKSPACE-Konten auf — für steinaberfeinbl@gmail.com endete jeder Aufruf in
+      # „project not enrolled in the Google Workspace Developer Preview Program". Gmail läuft
+      # deshalb wie AOL über IMAP + App-Passwort (modules/mail-mcp.nix, Tool-Server-ID
+      # bleibt `gmail`). Google-Projekt und OAuth-Client sind entfernt — Geschichte im
+      # git-Log und in docs/mail-mcp.md.
+
+      # ── GitHub: offizieller, remote gehosteter MCP (api.githubcopilot.com) ──────
+      # OAuth pro Nutzer: jeder, der den Server sieht, verbindet einmal im Browser sein
+      # eigenes GitHub-Konto; das Token liegt verschlüsselt (WEBUI_SECRET_KEY) in seiner
+      # DB-Zeile. Gemessen am 2026-10-16:
+      #   * Protected-Resource-Metadata nennt `https://github.com/login/oauth` als AS,
+      #   * dessen RFC-8414-Metadata hat KEIN `registration_endpoint` und kein
+      #     `client_id_metadata_document_supported` — dynamische Registrierung
+      #     (`auth_type = "oauth_2.1"`) scheitert also. Deshalb `oauth_2.1_static` mit
+      #     einer vorab angelegten GitHub-OAuth-App (docs/github-mcp.md) und dem
+      #     open-webui-Patch oben.
+      #   * Redirect-URI: `{WEBUI_URL}/oauth/clients/mcp:github/callback` — ändert sich die
+      #     ID, MUSS die Callback-URL der OAuth-App nachgezogen werden.
       #
-      #   * `auth_type = "oauth_2.1_static"` — OpenWebUI 0.11 kennt zwei OAuth-Varianten
-      #     (utils/tools.py: `elif auth_type in ('oauth_2.1', 'oauth_2.1_static')`).
-      #     Die dynamische registriert den Client beim AS selbst (RFC 7591); Google
-      #     unterstützt das NICHT, also die statische mit vorab angelegter Client-ID.
-      #   * `info.oauth_client_id` / `info.oauth_client_secret` überschreiben in
-      #     `resolve_oauth_client_info` den gespeicherten Blob — genau der Weg, über den
-      #     die Zugangsdaten aus dem Repo statt aus der UI kommen.
-      #   * Die Redirect-URI baut OpenWebUI als `{WEBUI_URL}/oauth/clients/mcp:{id}/callback`.
-      #     Der Doppelpunkt im Pfad sieht falsch aus, ist aber RFC-3986-konform und wurde
-      #     von der Google Cloud Console am 2026-09-02 akzeptiert. Ändert sich `gmailToolServerId`,
-      #     ändert sich die Redirect-URI — dann MUSS sie im OAuth-Client nachgezogen werden,
-      #     sonst endet die Zustimmung in redirect_uri_mismatch.
-      #   * Das Token holt sich JEDER OpenWebUI-Nutzer selbst (Zustimmung im Browser) und es
-      #     landet verschlüsselt in seiner DB-Zeile — mit WEBUI_SECRET_KEY, der hier aus
-      #     agenix kommt und über Neustarts stabil ist. Wäre er flüchtig, wäre nach jedem
-      #     Pod-Restart jede Gmail-Verbindung tot.
-      #
-      # Google-Projekt `gmail-mcp-507417`, Zustimmungsbildschirm Extern/**Test**: nur wer
-      # dort als Testnutzer steht, kommt durch (aktuell steinaberfeinbl@gmail.com).
-      # Freigegebene Scopes: gmail.readonly + gmail.compose. Der MCP bietet damit Lesen,
-      # Suchen, Threads, Labels und das Anlegen von Entwürfen — **kein Senden**.
-      gmailToolServerId = chatSpec.gmailToolServerId;
-      gmailToolServerUrl = chatSpec.gmailToolServerUrl;
-      # Client-IDs sind per OAuth-Design öffentlich (sie stehen in jeder Autorisierungs-URL),
-      # nur das Secret liegt in agenix. Client: „Open WebUI chat.steinaberfein.de".
-      gmailOauthClientId = chatSpec.gmailOauthClientId;
-      # Scopes EXPLIZIT. Ohne `oauth_scope` nimmt upstream alle aus der
-      # Protected-Resource-Metadata — die nennt auch `https://mail.google.com/`,
-      # `gmail.modify` und `gmail.metadata`, die unser Zustimmungsbildschirm gar nicht
-      # fuehrt. Eine Autorisierungsanfrage mit nicht konfigurierten Scopes lehnt Google ab.
-      # Diese beiden sind identisch mit denen unter Datenzugriff im Projekt gmail-mcp-507417.
-      gmailOauthScope = chatSpec.gmailOauthScope;
-      gmailToolServerToolId = "server:mcp:${gmailToolServerId}";
+      # NUR für Admins: `access_grants = [ ]` heißt in 0.11 „privat, nur Admin"
+      # (utils/access_control `has_connection_access`) — für die Sichtbarkeit UND den
+      # Aufruf (middleware.py prüft vor jedem MCP-Connect). Admin ist allein mberger
+      # (OAUTH_ADMIN_ROLES). Deshalb hängt GitHub auch an KEINEM Modell aus modelGrants:
+      # mberger schaltet es im Chat über das Tool-Menü zu.
+      githubToolServerId = chatSpec.githubToolServerId;
+      githubToolServerUrl = chatSpec.githubToolServerUrl;
+      # Client-IDs sind per OAuth-Design öffentlich; das Secret liegt in agenix.
+      githubOauthClientId = chatSpec.githubOauthClientId;
+      # Scopes EXPLIZIT: ohne `oauth_scope` fragt upstream ALLE aus der
+      # Protected-Resource-Metadata an (inkl. write:packages, project).
+      githubOauthScope = chatSpec.githubOauthScope;
+
+      # ── Mail-Postfächer über IMAP (modules/mail-mcp.nix) ────────────────────────
+      # Eigener Server pro Postfach, Bearer wie BrickLink. Das Postfach-Login (App-
+      # Passwort) liegt beim MCP, NICHT pro Nutzer: wer den Tool-Server sieht, arbeitet
+      # im selben Postfach — hier gewollt, mschuett und mberger betreuen es gemeinsam.
+      # Sichtbar für beide über access_grants `*` (siehe Begründung oben).
+      mailToolServers = lib.mapAttrsToList (slug: m: {
+        id = slug;
+        url = "http://${slug}-mail-mcp.chat.svc.cluster.local:${toString self.mailMcp.port}/mcp";
+        inherit (m) name description;
+      }) self.mailMcp.mailboxes;
+      mailToolServerToolIds = map (s: "server:mcp:${s.id}") mailToolServers;
 
       # ── Modell-Gating für mschuett ───────────────────────────────────────────────
       # Per-User-Modellsichtbarkeit ist in OpenWebUI DB-State (Tabellen model/access_grant),
@@ -311,16 +329,12 @@ in
             # überhaupt einen Bild-Upload anbietet; falsch gesetzt wäre es eine Einladung
             # in eine Fehlermeldung.
             vision = false;
-            # BrickLink- UND Gmail-MCP hängen an ALLEN drei Modellen: mschuett soll Shop und
-            # Postfach unabhängig davon bedienen können, welches Modell gerade ausgewählt ist.
-            # Bei Modellen ohne native Tool-Calls fällt OpenWebUI auf die
-            # prompt-basierte Auswahl zurück, der Server funktioniert also überall.
-            # Sichtbar heißt nicht nutzbar: der Gmail-MCP antwortet erst, wenn der jeweilige
-            # Nutzer die Google-Zustimmung erteilt hat — vorher liefert er 401.
-            tools = [
-              toolServerToolId
-              gmailToolServerToolId
-            ];
+            # BrickLink-MCP und die Postfächer (Gmail, AOL) hängen an ALLEN Modellen:
+            # mschuett soll Shop und Postfach unabhängig davon bedienen können, welches
+            # Modell gerade ausgewählt ist. Bei Modellen ohne native Tool-Calls fällt
+            # OpenWebUI auf die prompt-basierte Auswahl zurück, die Server funktionieren
+            # also überall.
+            tools = [ toolServerToolId ] ++ mailToolServerToolIds;
           }
           # claude-opus-5 stand hier bis 2026-09-11 („Aus dem Claude-Max-Abo über
           # meridian", Vision am 2026-08-27 mit einem echten Bild verifiziert).
@@ -338,10 +352,7 @@ in
             id = "collana.general";
             name = "Collana General";
             vision = true;
-            tools = [
-              toolServerToolId
-              gmailToolServerToolId
-            ];
+            tools = [ toolServerToolId ] ++ mailToolServerToolIds;
           }
         ];
       };
@@ -955,10 +966,8 @@ in
       age.secrets.openrouter-develappers.file =
         inputs.nix-config + "/base/secrets/openrouter-develappers.age";
       age.secrets.collana-auth-token.file = inputs.nix-config + "/base/secrets/collana-auth-token.age";
-      # Client-Secret des Google-OAuth-Clients für den Gmail-MCP. Anders als
-      # bricklink-mcp-bearer gehört es KEINEM anderen Modul — es wird nur hier gebraucht,
-      # also wird es auch hier deklariert.
-      age.secrets.gmail-mcp-oauth-secret.file = ../secrets/gmail-mcp-oauth-secret.age;
+      # Client-Secret der GitHub-OAuth-App — wird nur hier gebraucht.
+      age.secrets.github-mcp-oauth-secret.file = ../secrets/github-mcp-oauth-secret.age;
       # bricklink-mcp-bearer wird NICHT hier deklariert: das Secret gehört
       # modules/bricklink-mcp.nix, das es ebenfalls in ein k8s-Secret rendert. Hier wird
       # nur sein entschlüsselter Pfad gelesen. Folge: openwebui.nix setzt voraus, dass
@@ -1038,11 +1047,13 @@ in
           jq -j -n --arg url ${lib.escapeShellArg toolServerUrl} \
                    --arg id ${lib.escapeShellArg toolServerId} \
                    --arg key "$(cat ${config.age.secrets.bricklink-mcp-bearer.path})" \
-                   --arg gmailUrl ${lib.escapeShellArg gmailToolServerUrl} \
-                   --arg gmailId ${lib.escapeShellArg gmailToolServerId} \
-                   --arg gmailClientId ${lib.escapeShellArg gmailOauthClientId} \
-                   --arg gmailScope ${lib.escapeShellArg gmailOauthScope} \
-                   --arg gmailClientSecret "$(cat ${config.age.secrets.gmail-mcp-oauth-secret.path})" '[{
+                   --argjson mail ${lib.escapeShellArg (builtins.toJSON mailToolServers)} \
+                   --arg mailKey "$(cat ${config.age.secrets.mail-mcp-bearer.path})" \
+                   --arg githubUrl ${lib.escapeShellArg githubToolServerUrl} \
+                   --arg githubId ${lib.escapeShellArg githubToolServerId} \
+                   --arg githubClientId ${lib.escapeShellArg githubOauthClientId} \
+                   --arg githubScope ${lib.escapeShellArg githubOauthScope} \
+                   --arg githubClientSecret "$(cat ${config.age.secrets.github-mcp-oauth-secret.path})" '[{
             url: $url,
             path: "",
             type: "mcp",
@@ -1058,23 +1069,35 @@ in
               description: "Bestellungen, Nachrichten, Bewertungen, Inventar, Katalog und Preis-Guide des eigenen BrickLink-Stores. Schreibend nur: gepackt melden, versendet melden (mit Sendungsnummer), Feedback, Versandmail."
             }
           },{
-            url: $gmailUrl,
+            url: $githubUrl,
             path: "",
             type: "mcp",
             auth_type: "oauth_2.1_static",
             config: {
               enable: true,
-              access_grants: [ { principal_type: "user", principal_id: "*", permission: "read" } ]
+              # LEER = privat, nur Admin (mberger). Siehe githubToolServerId oben.
+              access_grants: []
             },
             info: {
-              id: $gmailId,
-              name: "Gmail",
-              description: "Googles offizieller Gmail-MCP. Mails und Threads suchen und lesen, Labels verwalten, Entwürfe anlegen. Kein Senden. Jeder Nutzer meldet sich einmalig mit seinem eigenen Google-Konto an.",
-              oauth_client_id: $gmailClientId,
-              oauth_client_secret: $gmailClientSecret,
-              oauth_scope: $gmailScope
+              id: $githubId,
+              name: "GitHub",
+              description: "GitHubs offizieller MCP: Repositories, Issues, Pull Requests, Code-Suche, Actions. Arbeitet mit dem eigenen GitHub-Konto (einmalige Anmeldung im Browser).",
+              oauth_client_id: $githubClientId,
+              oauth_client_secret: $githubClientSecret,
+              oauth_scope: $githubScope
             }
-          }]' > "$tmp/TOOL_SERVER_CONNECTIONS"
+          }] + ($mail | map({
+            url: .url,
+            path: "",
+            type: "mcp",
+            auth_type: "bearer",
+            key: $mailKey,
+            config: {
+              enable: true,
+              access_grants: [ { principal_type: "user", principal_id: "*", permission: "read" } ]
+            },
+            info: { id: .id, name: .name, description: .description }
+          }))' > "$tmp/TOOL_SERVER_CONNECTIONS"
 
           out=$(k3s kubectl create secret generic open-webui-secrets -n chat \
             --from-file="$tmp/OPENAI_API_KEYS" \

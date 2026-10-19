@@ -97,6 +97,10 @@
 
       domain = "idm.mauritiusberger.de";
       chatOrigin = "https://chat.steinaberfein.de";
+      # Webs von mberger im agentlab (nix-config/lab/modules/user-web.nix): je Dienst ein Host unter
+      # *.mberger.lab.mauritiusberger.de, davor oauth2-proxy (Client web-mberger, Cookie-Domain = Zone).
+      mbergerWebHosts = [ "hermes.mberger.lab.mauritiusberger.de" ];
+      webMbergerSecretFile = ../secrets/web-mberger-oidc-secret.age;
 
       serverToml = ''
         version = "2"
@@ -179,6 +183,8 @@
           # zeigt jeden Dienst und jeden Ausfall, das ist Betriebs- und keine
           # Nutzersicht. Max dazunehmen ist eine Zeile, wenn er sie braucht.
           "gatus-users"
+          # Eigene Webs im agentlab (oauth2-proxy + Hermes-Dashboard, siehe mbergerWebHosts).
+          "web-mberger-users"
         ];
         mschuett = [
           "openwebui-users"
@@ -193,6 +199,7 @@
         "openwebui-users"
         "openwebui-limited"
         "gatus-users"
+        "web-mberger-users"
       ];
 
       membersOf = group: lib.attrNames (lib.filterAttrs (_: groups: lib.elem group groups) personGroups);
@@ -234,6 +241,36 @@
           # gatus ist ein vertraulicher Client mit eigenem Secret, state und
           # nonce prüft Gatus selbst. Zurücknehmen, sobald Gatus PKCE kann.
           allowInsecureClientDisablePkce = true;
+        };
+
+        # oauth2-proxy vor allen mberger-Webs im agentlab. Vertraulicher Client; das Secret setzt
+        # kanidm-provision aus agenix (web-mberger-oidc-secret.age), derselbe Klartext liegt beim
+        # Konsumenten (nix-config/lab/secrets/). oauth2-proxy schickt PKCE (S256) → kein Opt-out nötig.
+        systems.oauth2.web-mberger = {
+          displayName = "mberger-Webs (agentlab)";
+          originUrl = map (h: "https://${h}/oauth2/callback") mbergerWebHosts;
+          originLanding = "https://${builtins.head mbergerWebHosts}/";
+          preferShortUsername = true;
+          basicSecretFile = "/secrets-web-mberger/oidc-client-secret";
+          scopeMaps.web-mberger-users = [
+            "openid"
+            "profile"
+            "email"
+          ];
+        };
+        # Hermes-Dashboard (hinter oauth2-proxy): eigener OIDC-Login, damit das Dashboard nicht nur
+        # am Proxy hängt. Öffentlicher PKCE-Client — Hermes' self_hosted-Provider braucht kein Secret.
+        systems.oauth2.hermes-mberger = {
+          displayName = "Hermes (mberger)";
+          public = true;
+          originUrl = "https://hermes.mberger.lab.mauritiusberger.de/auth/callback";
+          originLanding = "https://hermes.mberger.lab.mauritiusberger.de/";
+          preferShortUsername = true;
+          scopeMaps.web-mberger-users = [
+            "openid"
+            "profile"
+            "email"
+          ];
         };
 
         systems.oauth2.open-webui = {
@@ -324,6 +361,44 @@
       '';
     in
     {
+      age.secrets.web-mberger-oidc-secret.file = webMbergerSecretFile;
+
+      # chat/web-mberger-oidc aus agenix (Muster wie gatus-secrets). Muss VOR dem kanidm-Pod da
+      # sein, sonst hängt dessen Secret-Volume; Änderung → Pod neu, damit kanidm-provision den
+      # neuen Wert setzt.
+      systemd.services.web-mberger-oidc-secret = lib.mkIf (config.services.k3s.role == "server") {
+        description = "chat/web-mberger-oidc aus agenix rendern";
+        after = [ "k3s.service" ];
+        requires = [ "k3s.service" ];
+        wantedBy = [ "multi-user.target" ];
+        path = [
+          config.services.k3s.package
+          pkgs.coreutils
+          pkgs.gnugrep
+        ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          PrivateTmp = true;
+          Restart = "on-failure";
+          RestartSec = 15;
+        };
+        restartTriggers = [ (builtins.hashFile "sha256" webMbergerSecretFile) ];
+        script = ''
+          set -euo pipefail
+          for _ in $(seq 1 60); do k3s kubectl get ns chat >/dev/null 2>&1 && break || sleep 2; done
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          printf '%s' "$(cat ${config.age.secrets.web-mberger-oidc-secret.path})" > "$tmp/oidc-client-secret"
+          out=$(k3s kubectl create secret generic web-mberger-oidc -n chat \
+            --from-file="$tmp/oidc-client-secret" --dry-run=client -o yaml | k3s kubectl apply -f -)
+          echo "$out"
+          if ! echo "$out" | grep -q unchanged; then
+            k3s kubectl -n chat rollout restart deploy/kanidm || true
+          fi
+        '';
+      };
+
       services.k3s.manifests = lib.mkIf (config.services.k3s.role == "server") {
         kanidm.content = [
           {
@@ -406,6 +481,20 @@
                     {
                       name = "config";
                       configMap.name = "kanidm-config";
+                    }
+                    {
+                      # Client-Secret von web-mberger (oauth2-proxy im agentlab), gerendert von
+                      # systemd `web-mberger-oidc-secret` unten.
+                      name = "web-mberger-oidc-secret";
+                      secret = {
+                        secretName = "web-mberger-oidc";
+                        items = [
+                          {
+                            key = "oidc-client-secret";
+                            path = "oidc-client-secret";
+                          }
+                        ];
+                      };
                     }
                     {
                       # Client-Secret des gatus-OAuth2-Clients. Eigenes Secret,
@@ -596,6 +685,11 @@
                         {
                           name = "gatus-oidc-secret";
                           mountPath = "/secrets-gatus";
+                        }
+                        {
+                          name = "web-mberger-oidc-secret";
+                          mountPath = "/secrets-web-mberger";
+                          readOnly = true;
                         }
                         {
                           name = "oidc-secret";

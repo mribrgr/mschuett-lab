@@ -187,3 +187,47 @@ spec:
       allowedRoutes:
         namespaces:
           from: All
+
+    # ── Kurz-Adressen für Lukas' Dienste (2026-10-19) ─────────────────────────
+    # jellyfin./seerr./netbird.mauritiusberger.de leiten nur weiter — die Dienste
+    # selbst laufen bei Lukas (mercury, 5.45.99.133). Die Redirect-Routen liegen
+    # in templates/redirects.yaml, also in DERSELBEN ArgoCD-Quelle wie diese
+    # Listener: ein Push, kein Reihenfolge-Problem wie bei status./chat.
+    #
+    # Kein CNAME auf Lukas' Hosts: sein Proxy lehnt fremde SNI-Namen ab
+    # (`tlsv1 alert internal error`, 2026-10-19 geprüft), ein CNAME ergäbe ohne
+    # Zutun von Lukas nur einen TLS-Fehler. DNS braucht es hier keins — der
+    # Wildcard *.mauritiusberger.de zeigt schon auf 152.53.15.24.
+    - name: https-jellyfin
+      protocol: HTTPS
+      port: 443
+      hostname: jellyfin.mauritiusberger.de
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: jellyfin-mauritiusberger-de-tls
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: https-seerr
+      protocol: HTTPS
+      port: 443
+      hostname: seerr.mauritiusberger.de
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: seerr-mauritiusberger-de-tls
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: https-netbird
+      protocol: HTTPS
+      port: 443
+      hostname: netbird.mauritiusberger.de
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: netbird-mauritiusberger-de-tls
+      allowedRoutes:
+        namespaces:
+          from: All

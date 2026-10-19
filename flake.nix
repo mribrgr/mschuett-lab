@@ -68,12 +68,20 @@
     # Deshalb: committed steht der portable git-Input, und für die tägliche Arbeit
     # wird pro Aufruf überschrieben (kein Lock-Churn, kein flake update):
     #
-    #   nix eval --override-input nix-config path:$HOME/projects/nix-config \
+    #   nix eval --override-input nix-config git+file://$HOME/projects/nix-config \
     #     .#nixosConfigurations.netcup.config.networking.hostName
     #
     #   nixos-rebuild switch --flake .#netcup \
-    #     --override-input nix-config path:$HOME/projects/nix-config \
+    #     --override-input nix-config git+file://$HOME/projects/nix-config \
     #     --target-host root@… --build-on-remote
+    #
+    # ⚠️ `git+file:`, NICHT `path:`. `path:` kopiert das GANZE Verzeichnis samt
+    # git-ignorierter Dateien in den Store — und weil base/secrets über
+    # `inputs.nix-config + "/…"` referenziert wird, landet diese Quelle im System-Closure
+    # und damit im world-readable /nix/store auf netcup. Am 2026-10-13 gefunden:
+    # homelab/isos/ (545 MB) lag schon dort, homelab/keys/builder/id_ed25519 (privater
+    # Key) wäre beim nächsten Deploy gefolgt. `git+file:` nimmt nur getrackte Dateien
+    # (inkl. uncommitteter Änderungen) — neue Dateien in nix-config also `git add`en.
     #
     # Siehe TODO.md 0c. Sobald base/ gepusht ist, ist der Override unnötig.
     #

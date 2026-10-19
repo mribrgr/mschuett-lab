@@ -164,26 +164,38 @@ in
   # Servers eingetragen werden — das ist UI-State, kein Repo-State.
   "bricklink-mcp-bearer.age".publicKeys = all ++ [ netcup ];
 
-  # gmail-mcp-oauth-secret: Client-Secret des Google-OAuth-Clients „Open WebUI
-  # chat.steinaberfein.de" (Projekt gmail-mcp-507417). Damit spricht OpenWebUI Googles
-  # offiziellen Gmail-MCP (gmailmcp.googleapis.com) über `auth_type = "oauth_2.1_static"`
-  # an: die Client-ID steht im Klartext in modules/openwebui.nix — sie ist per OAuth-Design
-  # öffentlich und taucht ohnehin in jeder Autorisierungs-URL auf —, nur das Secret liegt hier.
-  #
-  # Die App steht auf Extern/Test; Zugriff hat nur, wer als Testnutzer eingetragen ist
-  # (aktuell steinaberfeinbl@gmail.com). Der Token-Austausch selbst passiert pro OpenWebUI-
-  # Nutzer und landet verschlüsselt in dessen DB-Zeile, nicht hier.
-  #
-  # Rotieren: in der Cloud Console einen neuen Clientschlüssel erzeugen, hier neu
-  # verschlüsseln, deployen — open-webui startet dabei neu (secretsChecksum), sonst
-  # spricht es Google mit dem alten Secret an und jeder Tool-Aufruf endet in invalid_client.
-  "gmail-mcp-oauth-secret.age".publicKeys = all ++ [ netcup ];
+  # github-mcp-oauth-secret: Client-Secret der GitHub-OAuth-App „Open WebUI
+  # chat.steinaberfein.de" (Konto mribrgr, github.com/settings/developers). Damit spricht
+  # OpenWebUI GitHubs MCP (api.githubcopilot.com/mcp/) über `oauth_2.1_static` an; die
+  # Client-ID steht im Klartext in modules/openwebui.nix. Rotieren: in der OAuth-App
+  # „Generate a new client secret", hier neu verschlüsseln, deployen (secretsChecksum
+  # startet open-webui neu), dann das alte Secret in der App löschen.
+  "github-mcp-oauth-secret.age".publicKeys = all ++ [ netcup ];
+
+  # ── Mail-MCP (modules/mail-mcp.nix) ────────────────────────────────────────
+  # mail-mcp-bearer: Bearer-Token, mit dem sich OpenWebUI bei JEDEM Mail-MCP anmeldet.
+  # Zweite Schranke hinter der CNP. Erzeugen: `openssl rand -hex 32`. Rotieren startet
+  # open-webui UND die Mail-MCPs neu (beide hashen die Datei).
+  "mail-mcp-bearer.age".publicKeys = all ++ [ netcup ];
+  # aol-mail-app-password: App-Passwort von maximilianschuett@aol.com — NICHT das
+  # Kontopasswort. Erzeugt in login.aol.com → Kontosicherheit → „App-Passwort
+  # generieren", Name „chat.steinaberfein.de". Wird nur einmal angezeigt; verloren =
+  # dort widerrufen und neu erzeugen. Inhalt ohne Leerzeichen und ohne Zeilenende.
+  "aol-mail-app-password.age".publicKeys = all ++ [ netcup ];
+  # gmail-app-password: Google-App-Passwort von steinaberfeinbl@gmail.com für IMAP
+  # (myaccount.google.com/apppasswords, Name „chat.steinaberfein.de"). Setzt die
+  # Bestätigung in zwei Schritten voraus; eine Änderung des Kontopassworts widerruft es.
+  "gmail-app-password.age".publicKeys = all ++ [ netcup ];
 
   # ── Gatus (modules/gatus.nix) ──────────────────────────────────────────────
   # gatus-oidc-secret: Client-Secret des kanidm-OAuth2-Clients "gatus". EINE
   # Quelle, zwei Konsumenten — Gatus zeigt es vor, kanidm-provision setzt es.
   # Erzeugen: `openssl rand -base64 32`.
   "gatus-oidc-secret.age".publicKeys = all ++ [ netcup ];
+  # web-mberger-oidc-secret: Client-Secret des kanidm-OAuth2-Clients "web-mberger" (oauth2-proxy
+  # vor *.mberger.lab.mauritiusberger.de im agentlab). kanidm-provision SETZT es; derselbe Klartext liegt
+  # als nix-config/lab/secrets/web-mberger-oidc-secret.age beim Konsumenten — zusammen rotieren.
+  "web-mberger-oidc-secret.age".publicKeys = all ++ [ netcup ];
 
   # gatus-ntfy-topic: derselbe ntfy-Topic, über den der NAS seinen Tagesbericht
   # schickt (nix-config/base/secrets/ntfy-nas-topic.age). Bewusst derselbe

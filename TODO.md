@@ -135,13 +135,20 @@ nixosConfigurations der anderen Welten evaluieren. Genau das schließt
 arbeiten** — dann braucht es weder Push noch `nix flake update`:
 
 ```sh
-nix eval --override-input nix-config path:$HOME/projects/nix-config \
+nix eval --override-input nix-config git+file://$HOME/projects/nix-config \
   .#nixosConfigurations.netcup.config.services.k3s.extraFlags
 
 nixos-rebuild switch --flake .#netcup \
-  --override-input nix-config path:$HOME/projects/nix-config \
+  --override-input nix-config git+file://$HOME/projects/nix-config \
   --target-host root@v2202505270128345138.powersrv.de --build-on-remote
 ```
+
+⚠️ **`git+file:`, nicht `path:`** (geändert 2026-10-13). `path:` kopiert auch
+git-ignorierte Dateien in den Store, und die nix-config-Quelle landet im
+System-Closure auf netcup (world-readable `/nix/store`). Gefunden: `homelab/isos/`
+(545 MB) lag dort schon in `/nix/store/ixpi6w6q…-source`; der private Key
+`homelab/keys/builder/id_ed25519` wäre beim nächsten Deploy gefolgt. Neue Dateien in
+nix-config müssen für `git+file:` per `git add` getrackt sein.
 
 Ohne Override zieht der Input die **gepushte** Revision; ungepushte
 base/-Änderungen schlagen dann so fehl (2026-08-05 gesehen):

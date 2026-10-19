@@ -23,15 +23,15 @@ Keiner davon ist an „läuft der Pod?" zu erkennen.
 
 | # | Prüfung |
 |---|---------|
-| 1 | Alle sechs Deployments in `chat` vollständig ready |
+| 1 | Alle Deployments in `chat` vollständig ready (inkl. je ein `<postfach>-mail-mcp`) |
 | 2 | `GET /health` über die **öffentliche** URL → 200 |
 | 3 | `enable_login_form=false`, `enable_signup=false`, `auth=true` |
 | 4 | `/openapi.json` ist **kein** OpenAPI-Dokument (`ENV=prod`) |
 | 5 | Konto des Nicht-Admins existiert, Rolle ist `user` |
 | 6 | `/api/models` liefert **exakt** die freigegebenen Modelle |
-| 7 | Beide MCP-Tool-Server sichtbar (`bricklink`, `gmail`) |
-| 8 | Gmail-Authorize → 302 zu `accounts.google.com` mit korrekter `client_id`, `redirect_uri` und beiden Scopes |
-| 9 | BrickLink-MCP erreichbar **und** ohne Bearer verschlossen (401/403) |
+| 7 | Alle MCP-Tool-Server sichtbar (`bricklink` + jedes Postfach aus `self.mailMcp`) |
+| 8 | BrickLink-MCP erreichbar **und** ohne Bearer verschlossen (401/403) |
+| 9 | Jeder Mail-MCP ohne Bearer verschlossen; mit Bearer echter `list_folders`-Aufruf = IMAP-Login |
 
 ## Entwurfsentscheidungen
 
@@ -59,13 +59,18 @@ Regressionsfall genau das Admin-Konto anlegen, das er aufdecken soll.
 fünf Minuten (`terminationGracePeriodSeconds` 300 bei `Recreate`) — ein Test in der
 Aktivierung meldete zuverlässig rot, obwohl alles in Ordnung ist.
 
+**Timeouts wie open-webui, nicht eigene.** Der Test soll genau dann rot werden, wenn
+auch der Nutzer im Chat einen Fehler sähe. open-webui 0.11 gibt `initialize` 10 s
+(`MCP_INITIALIZE_TIMEOUT`) und dem Tool-Aufruf 300 s (MCP-SDK, `httpx.Timeout(30,
+read=300)`); ein Gesamtlimit pro Tool-Aufruf gibt es nicht, ein Fehler landet als Text
+beim Modell. Die Probe in Schritt 9 nutzt dieselben Grenzen. Bricht der Mail-MCP vorher
+selbst ab (`IMAP_TIMEOUT_S`, 60 s pro IMAP-Operation), sieht der Nutzer dieselbe Meldung
+wie der Test. Die PASS-Zeile nennt die Dauer — das ist die Wartezeit im Chat.
+
 ## Gegenprobe
 
-Ein Test, der nicht rot werden kann, ist wertlos. Für Schritt 8 nachgewiesen
-(2026-09-03): ein nicht registrierter Client (`mcp:doesnotexist`) liefert 404 mit leerem
-`redirect_url` — genau der Zweig, den die Prüfung als FAIL wertet.
-
-```
-mcp%3Agmail            http=302 redirect=[https://accounts.google.com/o/oauth2/v2/…]
-mcp%3Adoesnotexist     http=404 redirect=[]
-```
+Ein Test, der nicht rot werden kann, ist wertlos. Für Schritt 9 nachgewiesen
+(2026-10-13): mit falschem Bearer antwortet der Mail-MCP auf `initialize` mit 401 und
+ohne `Mcp-Session-Id` — der Probe-Ausgang ist dann nicht numerisch, die Prüfung wertet
+das als FAIL. Die frühere Gegenprobe für den Gmail-OAuth-Schritt (`mcp:doesnotexist` →
+404) ist mit dem offiziellen Gmail-MCP entfallen.

@@ -2,74 +2,36 @@
 # (2026-10-19). Hier läuft kein Backend, nur der RequestRedirect am Gateway.
 # Die zugehörigen HTTPS-Listener stehen in templates/gateway.yaml.
 #
-# Je Route zwei parentRefs: `http` (:80) und der eigene HTTPS-Listener. Auf :80
-# geht es direkt zum Ziel statt erst auf https://<kurz-adresse>. Der
-# ACME-Solver von cert-manager matcht den exakten Challenge-Pfad und gewinnt
-# damit die Gateway-API-Präzedenz gegen das implizite Prefix-`/` hier — das
-# Zertifikat für die Kurz-Adresse lässt sich also trotzdem ausstellen.
+# Je Host ZWEI Routen, nicht eine mit zwei parentRefs: Cilium übersetzt
+# `scheme: https` in eine Envoy-Route, die nur greift, wenn X-Forwarded-Proto
+# NICHT https ist (Schleifenschutz für den üblichen http→https-Redirect). Auf
+# dem HTTPS-Listener ist XFP immer https — die Route matcht nie, Envoy
+# antwortet 404 (2026-10-19 so beobachtet). Deshalb:
+#   • `-http`: Listener `http` (:80), mit `scheme: https`, direkt zum Ziel.
+#   • ohne Suffix: HTTPS-Listener, OHNE `scheme` — das Schema der Anfrage ist
+#     dort schon https und wird übernommen.
+# Der ACME-Solver von cert-manager matcht auf :80 den exakten Challenge-Pfad
+# und gewinnt damit die Gateway-API-Präzedenz gegen das implizite Prefix-`/`.
 #
 # 302 statt 301: Browser cachen einen 301 dauerhaft. Zieht ein Ziel bei Lukas
 # um, wäre die alte Adresse sonst bis zum Cache-Leeren festgenagelt. Der Pfad
-# wird mitgenommen (kein `path` im Filter), jellyfin.mauritiusberger.de/web/
-# landet also auf …lukashirsch.de/web/.
-apiVersion: gateway.networking.k8s.io/v1
-kind: HTTPRoute
-metadata:
-  name: jellyfin-mauritiusberger-de-redirect
-  namespace: default
-spec:
-  parentRefs:
-    - name: main
-      namespace: default
-      kind: Gateway
-      sectionName: http
-    - name: main
-      namespace: default
-      kind: Gateway
-      sectionName: https-jellyfin
-  hostnames:
-    - jellyfin.mauritiusberger.de
-  rules:
-    - filters:
-        - type: RequestRedirect
-          requestRedirect:
-            scheme: https
-            hostname: jellyfin.deimos.mars.lukashirsch.de
-            statusCode: 302
----
-apiVersion: gateway.networking.k8s.io/v1
-kind: HTTPRoute
-metadata:
-  name: seerr-mauritiusberger-de-redirect
-  namespace: default
-spec:
-  parentRefs:
-    - name: main
-      namespace: default
-      kind: Gateway
-      sectionName: http
-    - name: main
-      namespace: default
-      kind: Gateway
-      sectionName: https-seerr
-  hostnames:
-    - seerr.mauritiusberger.de
-  rules:
-    - filters:
-        - type: RequestRedirect
-          requestRedirect:
-            scheme: https
-            hostname: seerr.deimos.mars.lukashirsch.de
-            statusCode: 302
----
-# Nur fürs Dashboard im Browser. Als Management-URL für netbird-Clients taugt
-# die Kurz-Adresse NICHT: gRPC folgt keinem Redirect, und Lukas' OIDC-Redirects
-# sind an netbird.lukashirsch.de gebunden. Clients bleiben auf der echten URL
+# wird mitgenommen (kein `path` im Filter).
+#
+# netbird. nur fürs Dashboard im Browser: als Management-URL für Clients taugt
+# die Kurz-Adresse NICHT (gRPC folgt keinem Redirect, Lukas' OIDC-Redirects
+# hängen an netbird.lukashirsch.de). Clients bleiben auf der echten URL
 # (base/modules/netbird.nix in nix-config).
+{{- $redirects := list
+  (dict "name" "jellyfin" "target" "jellyfin.deimos.mars.lukashirsch.de")
+  (dict "name" "seerr" "target" "seerr.deimos.mars.lukashirsch.de")
+  (dict "name" "netbird" "target" "netbird.lukashirsch.de")
+}}
+{{- range $redirects }}
+---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: netbird-mauritiusberger-de-redirect
+  name: {{ .name }}-mauritiusberger-de-redirect-http
   namespace: default
 spec:
   parentRefs:
@@ -77,16 +39,33 @@ spec:
       namespace: default
       kind: Gateway
       sectionName: http
-    - name: main
-      namespace: default
-      kind: Gateway
-      sectionName: https-netbird
   hostnames:
-    - netbird.mauritiusberger.de
+    - {{ .name }}.mauritiusberger.de
   rules:
     - filters:
         - type: RequestRedirect
           requestRedirect:
             scheme: https
-            hostname: netbird.lukashirsch.de
+            hostname: {{ .target }}
             statusCode: 302
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ .name }}-mauritiusberger-de-redirect
+  namespace: default
+spec:
+  parentRefs:
+    - name: main
+      namespace: default
+      kind: Gateway
+      sectionName: https-{{ .name }}
+  hostnames:
+    - {{ .name }}.mauritiusberger.de
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            hostname: {{ .target }}
+            statusCode: 302
+{{- end }}

@@ -54,6 +54,9 @@
         # steinaberfein.de als nix:0-Image. Liegt bei den k3s-Manifesten statt bei
         # ArgoCD, weil der nix:0-Ref ein Store-Pfad ist — siehe Modulkopf.
         self.outputs.modules.nixos.steinaberfeinde
+        # Ali-Baba-Landingpages alibaba-rot./alibaba-blau.mauritiusberger.de,
+        # gleiches Muster (nix:0 + darkhttpd, Content unter web/).
+        self.outputs.modules.nixos.alibaba
 
         # ── Persönliche Dienste: chat.mauritiusberger.de + idm.mauritiusberger.de ──
         # Namespace `chat`, beide Workloads als nix:0-Images. Auch Leaf-Module: nur
@@ -90,6 +93,7 @@
         # Design: nix-config/docs/superpowers/specs/2026-08-26-velero-nas-mirror-design.md
         self.outputs.modules.nixos.backup-store
         self.outputs.modules.nixos.gatus # Status-Seite + Heartbeat-Empfänger
+        self.outputs.modules.nixos.velero-heartbeat # velero-Status → Gatus
       ];
 
       nixpkgs.hostPlatform = "aarch64-linux";

@@ -126,6 +126,35 @@ spec:
         namespaces:
           from: All
 
+    # ── alibaba-rot./alibaba-blau.mauritiusberger.de (Ali-Baba-Landingpages) ────
+    # Je eigenes Secret wie alle übrigen Hosts — Renewals und LE-Rate-Limits bleiben
+    # pro Host getrennt. Die HTTPRoutes + Deployments kommen aus dem Flake
+    # (modules/alibaba.nix); wie bei status./chat sind das zwei Quellen, zwei
+    # Zeitpunkte — hier relevant nur als Merksatz: erst Listener, dann Route.
+    # DNS braucht es keins: Wildcard *.mauritiusberger.de → 152.53.15.24.
+    - name: https-alibaba-rot
+      protocol: HTTPS
+      port: 443
+      hostname: alibaba-rot.mauritiusberger.de
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: alibaba-rot-mauritiusberger-de-tls
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: https-alibaba-blau
+      protocol: HTTPS
+      port: 443
+      hostname: alibaba-blau.mauritiusberger.de
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: alibaba-blau-mauritiusberger-de-tls
+      allowedRoutes:
+        namespaces:
+          from: All
+
     # ── chat./idm.mauritiusberger.de (OpenWebUI + Kanidm, Namespace `chat`) ────
     # Je eigenes Secret wie bei den übrigen Hosts: dadurch sind Renewals und
     # LE-Rate-Limits pro Host getrennt. Die Certificates legt der

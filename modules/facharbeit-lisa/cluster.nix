@@ -1,12 +1,11 @@
 {
-  inputs,
   lib,
   self,
   ...
 }:
 let
   # facharbeit.lisa.mauritiusberger.de: private Lernseite für Lisas Facharbeit
-  # (Aufgabenpakete, Varianten, Quellen, PDF/Word-Downloads), fürs iPad gebaut.
+  # (Aufgabenpakete, Varianten, Quellen, PDF/Word-Downloads), fürs iPad und Handy.
   #
   # ⚠️ Der Inhalt liegt NICHT im Repo: web/facharbeit-lisa/ steht in .gitignore,
   # weil dieses Repo öffentlich ist und die Seite Lisas Namen, einen Plagiatsbefund
@@ -15,90 +14,20 @@ let
   # in der Builder-VM) nimmt den Ordner trotzdem mit. Fehlt er (frischer Clone,
   # `git+file:`-Eval), erzeugt dieses Modul gar nichts — Eval bleibt grün.
   #
-  # Schutz: Basic-Auth im nginx (htpasswd aus agenix, Benutzer `lisa`) plus
-  # noindex/robots-Sperre, damit weder Suchmaschinen noch Plagiats-Crawler den
-  # Text sehen. Icons, Manifest und robots.txt sind ohne Login abrufbar, weil
-  # iPadOS sie für „Zum Home-Bildschirm" ohne Zugangsdaten lädt.
+  # Ein Pod, zwei Container:
+  #   web — nginx: Basic-Auth (htpasswd aus agenix, Benutzer `lisa`), noindex,
+  #         statische Seite, /api/ → 127.0.0.1:3000
+  #   api — _api.py: Lisas Auswahl/Notizen/Haken als JSON auf der PVC, damit iPad
+  #         und Handy denselben Stand sehen; changes.jsonl protokolliert jede Änderung.
+  # Icons, Manifest und robots.txt sind ohne Login abrufbar, weil iPadOS sie für
+  # „Zum Home-Bildschirm" ohne Zugangsdaten lädt.
   siteDir = self + "/web/facharbeit-lisa";
   hasSite = builtins.pathExists siteDir;
-  secretFile = ../secrets/facharbeit-lisa-htpasswd.age;
+  secretFile = ../../secrets/facharbeit-lisa-htpasswd.age;
+  name = "facharbeit-lisa";
+  host = "facharbeit.lisa.mauritiusberger.de";
 in
 {
-  perSystem =
-    {
-      pkgs,
-      system,
-      ...
-    }:
-    let
-      # Gleiches Snapshotter-Overlay wie in alibaba.nix (aarch64-netcup).
-      pkgsSnap = import inputs.nixpkgs {
-        inherit system;
-        overlays = [ inputs.nix-snapshotter.overlays.default ];
-      };
-      site = lib.cleanSource siteDir;
-
-      # Als Verzeichnis (destination), nicht als Datei: nix-snapshotter bindet
-      # Store-Pfade als Verzeichnisse ein (vgl. alibaba.nix, 2026-10-29).
-      nginxConf = pkgs.writeTextFile {
-        name = "facharbeit-lisa-nginx";
-        destination = "/nginx.conf";
-        text = ''
-          worker_processes 1;
-          pid /tmp/nginx.pid;
-          error_log /dev/stderr warn;
-          events { worker_connections 256; }
-          http {
-            include ${pkgs.nginx}/conf/mime.types;
-            types { application/manifest+json webmanifest; }
-            default_type application/octet-stream;
-            access_log /dev/stdout;
-            client_body_temp_path /tmp/client_body;
-            proxy_temp_path /tmp/proxy;
-            fastcgi_temp_path /tmp/fastcgi;
-            uwsgi_temp_path /tmp/uwsgi;
-            scgi_temp_path /tmp/scgi;
-            server_tokens off;
-            sendfile on;
-            gzip on;
-            gzip_types text/css text/javascript application/javascript application/json application/manifest+json text/plain;
-            server {
-              listen 8080;
-              root ${site};
-              # Store-Dateien haben mtime 1970 → ohne das bekäme das iPad veraltete Seiten.
-              etag off;
-              if_modified_since off;
-              add_header Cache-Control "no-cache" always;
-              add_header X-Robots-Tag "noindex, nofollow, noarchive" always;
-              add_header Referrer-Policy "no-referrer" always;
-              add_header X-Content-Type-Options "nosniff" always;
-              auth_basic "Facharbeit Lisa";
-              auth_basic_user_file /auth/htpasswd;
-              location ~ /\. { deny all; }
-              location = /healthz { auth_basic off; access_log off; default_type text/plain; return 200 "ok\n"; }
-              location ~ ^/(robots\.txt|manifest\.webmanifest|apple-touch-icon\.png|icon-192\.png|icon-512\.png)$ { auth_basic off; }
-              location / { try_files $uri $uri/ =404; }
-            }
-          }
-        '';
-      };
-    in
-    lib.optionalAttrs hasSite {
-      packages.facharbeit-lisa-image = pkgsSnap.nix-snapshotter.buildImage {
-        name = "facharbeit-lisa";
-        resolvedByNix = true;
-        config.entrypoint = [
-          "${pkgs.nginx}/bin/nginx"
-          "-c"
-          "${nginxConf}/nginx.conf"
-          "-e"
-          "/dev/stderr"
-          "-g"
-          "daemon off;"
-        ];
-      };
-    };
-
   flake.modules.nixos.facharbeit-lisa =
     {
       config,
@@ -107,8 +36,7 @@ in
       ...
     }:
     let
-      name = "facharbeit-lisa";
-      host = "facharbeit.lisa.mauritiusberger.de";
+      imgs = self.packages.${pkgs.stdenv.hostPlatform.system};
       isServer = config.services.k3s.role == "server";
     in
     lib.mkIf (hasSite && isServer) {
@@ -156,8 +84,21 @@ in
       };
 
       # Listener steht in charts/root-app/templates/gateway.yaml (ArgoCD) — wie bei
-      # allen *.mauritiusberger.de-Hosts; die Route hängt bis dahin kurz ins Leere.
+      # allen *.mauritiusberger.de-Hosts.
       services.k3s.manifests.${name}.content = [
+        {
+          apiVersion = "v1";
+          kind = "PersistentVolumeClaim";
+          metadata = {
+            name = "${name}-data";
+            namespace = "default";
+          };
+          # local-path ist Default-StorageClass → kein storageClassName nötig.
+          spec = {
+            accessModes = [ "ReadWriteOnce" ];
+            resources.requests.storage = "100Mi";
+          };
+        }
         {
           apiVersion = "apps/v1";
           kind = "Deployment";
@@ -167,6 +108,13 @@ in
           };
           spec = {
             replicas = 1;
+            # RWO-Volume + eine Datei als Speicher: nie zwei Pods gleichzeitig.
+            # rollingUpdate = null entfernt das Feld aus dem bisher laufenden Objekt —
+            # sonst lehnt die API „Recreate" neben alten rollingUpdate-Werten ab.
+            strategy = {
+              type = "Recreate";
+              rollingUpdate = null;
+            };
             selector.matchLabels.app = name;
             template = {
               metadata.labels.app = name;
@@ -176,6 +124,7 @@ in
                   runAsUser = 65534;
                   runAsGroup = 65534;
                   runAsNonRoot = true;
+                  fsGroup = 65534;
                 };
                 volumes = [
                   {
@@ -186,12 +135,16 @@ in
                     name = "auth";
                     secret.secretName = "facharbeit-lisa-auth";
                   }
+                  {
+                    name = "data";
+                    persistentVolumeClaim.claimName = "${name}-data";
+                  }
                 ];
                 containers = [
                   {
-                    inherit name;
+                    name = "web";
                     # nix:0 — vom nix-snapshotter aufgelöst; IfNotPresent wie in alibaba.nix.
-                    image = self.packages.${pkgs.stdenv.hostPlatform.system}.facharbeit-lisa-image.image;
+                    image = imgs.facharbeit-lisa-image.image;
                     imagePullPolicy = "IfNotPresent";
                     ports = [ { containerPort = 8080; } ];
                     volumeMounts = [
@@ -218,6 +171,42 @@ in
                         memory = "16Mi";
                       };
                       limits.memory = "64Mi";
+                    };
+                  }
+                  {
+                    name = "api";
+                    image = imgs.facharbeit-lisa-api-image.image;
+                    imagePullPolicy = "IfNotPresent";
+                    env = [
+                      {
+                        name = "DATA_DIR";
+                        value = "/data";
+                      }
+                      {
+                        name = "PORT";
+                        value = "3000";
+                      }
+                    ];
+                    volumeMounts = [
+                      {
+                        name = "data";
+                        mountPath = "/data";
+                      }
+                    ];
+                    # lauscht nur auf 127.0.0.1 → Probe läuft über den nginx im selben Pod
+                    readinessProbe = {
+                      httpGet = {
+                        path = "/healthz-api";
+                        port = 8080;
+                      };
+                      periodSeconds = 10;
+                    };
+                    resources = {
+                      requests = {
+                        cpu = "10m";
+                        memory = "24Mi";
+                      };
+                      limits.memory = "96Mi";
                     };
                   }
                 ];

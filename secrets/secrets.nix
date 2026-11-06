@@ -92,6 +92,11 @@ in
   # SearXNG `server.secret_key` — signiert die Such-Sessions. Kein Nutzer-Credential,
   # aber SearXNG startet ohne einen gesetzten Wert nicht.
   "searxng-secret.age".publicKeys = all ++ [ netcup ];
+
+  # Basic-Auth für facharbeit.lisa.mauritiusberger.de (modules/facharbeit-lisa.nix):
+  # eine htpasswd-Zeile `lisa:$apr1$…`. Klartext-Passwort: Apple Passwords,
+  # Eintrag „Facharbeit Lisa (Website)“. netcup braucht es zur Aktivierungszeit.
+  "facharbeit-lisa-htpasswd.age".publicKeys = all ++ [ netcup ];
   # Qdrant-API-Key. Der Dienst ist per CiliumNetworkPolicy schon nur für open-webui
   # erreichbar; der Key ist die zweite Schicht, damit ein Fehlgriff in der Policy nicht
   # sofort Lese-/Schreibzugriff auf alle Vektoren bedeutet.

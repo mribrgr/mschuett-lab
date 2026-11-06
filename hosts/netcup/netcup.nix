@@ -57,6 +57,10 @@
         # Ali-Baba-Landingpages alibaba-rot./alibaba-blau.mauritiusberger.de,
         # gleiches Muster (nix:0 + darkhttpd, Content unter web/).
         self.outputs.modules.nixos.alibaba
+        # facharbeit.lisa.mauritiusberger.de: private Lernseite, nginx mit Basic-Auth.
+        # Inhalt gitignored unter web/facharbeit-lisa/ (Repo ist public) — Modul
+        # erzeugt ohne den Ordner nichts.
+        self.outputs.modules.nixos.facharbeit-lisa
 
         # ── Persönliche Dienste: chat.mauritiusberger.de + idm.mauritiusberger.de ──
         # Namespace `chat`, beide Workloads als nix:0-Images. Auch Leaf-Module: nur

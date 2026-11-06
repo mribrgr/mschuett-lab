@@ -155,6 +155,22 @@ spec:
         namespaces:
           from: All
 
+    # ── facharbeit.lisa.mauritiusberger.de (private Lernseite, Basic-Auth) ────
+    # Route + Deployment aus dem Flake (modules/facharbeit-lisa.nix). Der Inhalt
+    # liegt bewusst NICHT in diesem öffentlichen Repo (gitignored). DNS: Wildcard
+    # *.mauritiusberger.de deckt auch facharbeit.lisa. ab (geprüft 2026-11-06).
+    - name: https-facharbeit-lisa
+      protocol: HTTPS
+      port: 443
+      hostname: facharbeit.lisa.mauritiusberger.de
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: facharbeit-lisa-mauritiusberger-de-tls
+      allowedRoutes:
+        namespaces:
+          from: All
+
     # ── chat./idm.mauritiusberger.de (OpenWebUI + Kanidm, Namespace `chat`) ────
     # Je eigenes Secret wie bei den übrigen Hosts: dadurch sind Renewals und
     # LE-Rate-Limits pro Host getrennt. Die Certificates legt der

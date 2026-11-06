@@ -34,3 +34,8 @@ result-*
 # Python-Bytecode des bricklink-mcp
 __pycache__/
 *.pyc
+
+# Facharbeit Lisa: private Inhalte (Name, Plagiatsbefund, Textbausteine) — NIE ins
+# öffentliche Repo. Liegt nur lokal im Flake-Verzeichnis; der path:-Build in der
+# Builder-VM (README „Bauen: NICHT auf diesem Node") nimmt es trotzdem mit.
+/web/facharbeit-lisa/

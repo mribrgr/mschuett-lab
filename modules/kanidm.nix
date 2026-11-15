@@ -574,6 +574,13 @@
                         "/bin/bash"
                         "-ec"
                         ''
+                          # Das emptyDir überlebt einen Node-Reboot (gleiche Pod-UID),
+                          # tls-init läuft dann ein zweites Mal — und der 0400-Key vom
+                          # ersten Lauf ist nicht überschreibbar ("Can't open
+                          # /tls/key.pem for writing"). So am 2026-10-19 nach dem
+                          # Neustart von netcup: kanidm in CrashLoop, mit ihm Gatus
+                          # (OIDC-Issuer weg → panic) und jedes SSO-Login.
+                          rm -f /tls/key.pem /tls/chain.pem
                           openssl req -x509 -newkey rsa:4096 -sha256 -nodes -days 3650 \
                             -subj "/CN=${domain}" \
                             -addext "subjectAltName=DNS:${domain},DNS:localhost,IP:127.0.0.1" \

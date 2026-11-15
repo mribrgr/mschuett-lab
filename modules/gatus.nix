@@ -6,6 +6,7 @@
   # Die Wächter, die es vorher gab, liefen alle IM überwachten Fehlerbereich:
   #   • nas-alerts.nix meldete den NAS-Ausfall — vom NAS aus.
   #   • nas-deadman.nix (Mac) prüfte nachts um 09:20 — nur bei offenem Deckel.
+  #     Am 2026-09-29 entfernt, nachdem der erste Gatus-Alarm per ntfy ankam.
   # Beim NAS-Ausfall ab dem 05.09.2026 merkte es deshalb neun Tage lang niemand.
   #
   # Gatus steht außerhalb von beidem. Entscheidend ist dabei nicht die hübsche
@@ -22,13 +23,29 @@
   # liefert. Longhorn, der zweite Grund für das Mesh, ist mit derselben
   # Entscheidung gestrichen: Backups werden gezogen, kurze Downtime ist okay.
   #
-  # ── Warum nur öffentliche Endpunkte aktiv geprüft werden ───────────────────
-  # searxng, qdrant, bricklink-mcp und open-webui liegen hinter je einer
-  # CiliumNetworkPolicy, die den Ingress auf genau einen Peer einschränkt. Ein
+  # ── Warum die Chat-Backends nicht direkt geprüft werden ────────────────────
+  # searxng, qdrant, meridian, bricklink-mcp und mail-mcp liegen hinter je
+  # einer CiliumNetworkPolicy, die den Ingress auf open-webui einschränkt. Ein
   # Check aus Namespace `monitoring` hieße, diese Policies aufzuweichen — für
-  # ein Monitoring-Nice-to-have. Stattdessen läuft der Check über den
+  # ein Monitoring-Nice-to-have. chat-e2e prüft sie ohnehin mit (Schritt 1:
+  # jedes Deployment in `chat` ready). Öffentliche Dienste laufen über den
   # öffentlichen Weg durchs Gateway, also über genau die Strecke, die auch ein
-  # Nutzer nimmt. Das prüft nebenbei Gateway, TLS und DNS mit.
+  # Nutzer nimmt. Das prüft nebenbei Gateway, TLS und DNS mit. Direkt im
+  # Cluster geprüft wird nur, was KEINE Policy hat (Namespace default,
+  # backup-store) und keinen öffentlichen Weg.
+  #
+  # ── Öffentliche Dienste kommen aus dem Gateway, nicht aus dieser Datei ─────
+  # Jeder HTTPS-Listener am Gateway default/main wird automatisch ein Check
+  # (Sidecar `discovery`, Wunsch 2026-10-19: „neue Apps gleich drin“). Die
+  # Listener stammen aus ZWEI Quellen — charts/root-app/templates/gateway.yaml
+  # (ArgoCD) und den nix-Modulen hier —, eine Liste in diesem Modul würde also
+  # zwangsläufig hinterherlaufen. Gatus liest /config als Verzeichnis
+  # (deepmerge, `endpoints` werden aneinandergehängt) und lädt bei geänderter
+  # mtime binnen 30 s neu; der Sidecar schreibt deshalb nur bei echter
+  # Änderung. Was hier noch steht, ist nur die Abweichung vom Standard-Check
+  # (`discovery.overrides`: anderer Pfad, strengere Bedingung, Name).
+  # Ein entfernter Listener verschwindet damit still von der Seite — gewollt:
+  # wer den Listener löscht, schaltet die App ab.
   perSystem =
     { pkgs, system, ... }:
     {
@@ -61,8 +78,108 @@
             env = [
               "PATH=/bin"
               "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
-              "GATUS_CONFIG_PATH=/config/config.yaml"
+              # Verzeichnis, nicht Datei: statische Config (ConfigMap unter
+              # /config/static) + discovered.yaml vom Sidecar.
+              "GATUS_CONFIG_PATH=/config"
             ];
+          };
+        };
+
+      # Liest die HTTPS-Listener von Gateway default/main über die k8s-API und
+      # schreibt daraus /out/discovered.yaml (JSON ist gültiges YAML). Läuft
+      # einmal als initContainer (`--once`, damit Gatus gleich mit allen
+      # Checks startet) und danach als Sidecar-Schleife.
+      packages.gatus-discovery-image =
+        let
+          pkgsSnap = import inputs.nixpkgs {
+            inherit system;
+            overlays = [ inputs.nix-snapshotter.overlays.default ];
+          };
+          program = pkgs.writeText "gatus-discovery.jq" ''
+            ($cfg[0]) as $c
+            | [ .spec.listeners[]
+                | select(.protocol == "HTTPS")
+                | .hostname // empty
+                | select(startswith("*") | not) ]
+            | unique
+            | map(select(. as $h | $c.exclude | any(. == $h) | not))
+            | map(. as $h | ($c.overrides[$h] // {}) as $o | ($o.name // $h) as $n | {
+                name: $n,
+                group: ($o.group // $c.group),
+                url: ("https://" + $h + ($o.path // "/")),
+                interval: ($o.interval // $c.interval),
+                conditions: (($o.conditions // $c.conditions) + $c.extraConditions)
+              }
+              + (if $o.alert == false then {} else
+                  { alerts: [ { type: "ntfy", description: ($n + " (https://" + $h + ") antwortet nicht") } ] } end)
+              + (if $o.client then { client: $o.client } else {} end))
+            | { endpoints: . }
+          '';
+          discovery = pkgs.writeShellApplication {
+            name = "gatus-discovery";
+            runtimeInputs = [
+              pkgs.curl
+              pkgs.jq
+              pkgs.coreutils
+            ];
+            text = ''
+              sa=/var/run/secrets/kubernetes.io/serviceaccount
+              url="https://kubernetes.default.svc/apis/gateway.networking.k8s.io/v1/namespaces/$GATEWAY_NAMESPACE/gateways/$GATEWAY_NAME"
+              out="$OUT_DIR/discovered.yaml"
+
+              render() {
+                local gw new
+                gw=$(curl -sf --max-time 10 --cacert "$sa/ca.crt" \
+                  -H "Authorization: Bearer $(cat "$sa/token")" "$url") \
+                  || { echo "gatus-discovery: Gateway $GATEWAY_NAMESPACE/$GATEWAY_NAME nicht lesbar" >&2; return 1; }
+                new=$(jq -S --slurpfile cfg "$DISCOVERY_CONFIG" -f ${program} <<<"$gw") || return 1
+                # Eine leere Liste schreibt NICHT: ein Gateway mitten im
+                # ArgoCD-Sync ohne Listener würde sonst alle öffentlichen Checks
+                # still von der Seite nehmen. Lieber der letzte gute Stand.
+                if [ "$(jq '.endpoints | length' <<<"$new")" -eq 0 ]; then
+                  echo "gatus-discovery: keine HTTPS-Listener gefunden, behalte alten Stand" >&2
+                  return 1
+                fi
+                # Nur bei echter Änderung schreiben: jede neue mtime lässt Gatus
+                # alle Checks neu starten.
+                if [ -f "$out" ] && [ "$(cat "$out")" = "$new" ]; then
+                  return 0
+                fi
+                # .tmp hat keine yaml-Endung, Gatus ignoriert sie; mv ist atomar.
+                printf '%s\n' "$new" > "$out.tmp"
+                mv "$out.tmp" "$out"
+                echo "gatus-discovery: $(jq -r '[.endpoints[].url] | join(" ")' <<<"$new")"
+              }
+
+              if [ "''${1:-}" = "--once" ]; then
+                # Darf den Pod-Start nie blockieren: ohne Datei läuft Gatus mit
+                # der statischen Config, der Sidecar holt den Rest nach.
+                render || true
+                exit 0
+              fi
+              while :; do
+                render || true
+                sleep "$INTERVAL"
+              done
+            '';
+          };
+          root = pkgs.buildEnv {
+            name = "gatus-discovery-root";
+            paths = [
+              discovery
+              pkgs.bashInteractive
+              pkgs.coreutils
+            ];
+            pathsToLink = [ "/bin" ];
+          };
+        in
+        pkgsSnap.nix-snapshotter.buildImage {
+          name = "gatus-discovery";
+          resolvedByNix = true;
+          copyToRoot = [ root ];
+          config = {
+            entrypoint = [ "/bin/gatus-discovery" ];
+            env = [ "PATH=/bin" ];
           };
         };
     };
@@ -76,10 +193,148 @@
     }:
     let
       img = self.packages.${pkgs.stdenv.hostPlatform.system}.gatus-image;
+      discoveryImg = self.packages.${pkgs.stdenv.hostPlatform.system}.gatus-discovery-image;
 
       ns = "monitoring";
       host = "status.mauritiusberger.de";
       idmOrigin = "https://idm.mauritiusberger.de";
+
+      gateway = {
+        namespace = "default";
+        name = "main";
+      };
+
+      # Standard-Check für jeden HTTPS-Listener und die Abweichungen davon.
+      # Name ist der Hostname, außer er sagt nicht, was dahinter läuft.
+      # `[STATUS] < 400` als Standard, weil Apps mit Login (grocy, paperless)
+      # auf / mit 302 antworten — das IST ihr gesunder Zustand.
+      discoveryConfig = {
+        group = "public";
+        interval = "5m";
+        conditions = [ "[STATUS] < 400" ];
+        # Hängt an JEDEN Check, auch an Overrides. CERTIFICATE_EXPIRATION fängt
+        # einen Fehler ab, den sonst NICHTS meldet: laut
+        # charts/root-app/templates/gateway.yaml ignoriert cert-manager die
+        # Gateway-Annotation STILL, wenn `gatewayAPI.enabled` fehlt — kein
+        # Fehler, nur nie ein Zertifikat. 240h Vorlauf reicht für zwei
+        # Renewal-Versuche von Let's Encrypt.
+        extraConditions = [ "[CERTIFICATE_EXPIRATION] > 240h" ];
+        # Gatus kann sein eigenes Fehlen nicht melden.
+        exclude = [ host ];
+        overrides = {
+          # Namen und Schlüssel public_open-webui / public_kanidm wie vor der
+          # Discovery — sonst wäre der Verlauf weg.
+          "chat.steinaberfein.de" = {
+            name = "open-webui";
+            path = "/health";
+            interval = "2m";
+            conditions = [
+              "[STATUS] == 200"
+              "[RESPONSE_TIME] < 3000"
+            ];
+          };
+          "idm.mauritiusberger.de" = {
+            name = "kanidm";
+            path = "/status";
+            interval = "2m";
+            conditions = [ "[STATUS] == 200" ];
+          };
+          "n8n.mauritiusberger.de" = {
+            path = "/healthz";
+            conditions = [ "[STATUS] == 200" ];
+          };
+          # Dieselbe Route wie die readinessProbe im Chart
+          # (not-just-a-developer.com, deploy/chart/templates/deployment.yaml).
+          # Stand 2026-10-19 steht ghostfolio auf replicas 0 → bewusst rot,
+          # solange es aus ist (auf Wunsch trotzdem aufgenommen). `alert =
+          # false`: sichtbar, aber kein ntfy (Wunsch 2026-10-20) — für einen
+          # absichtlich abgeschalteten Dienst ist jeder Alarm Rauschen. Wird
+          # ghostfolio wieder hochgefahren, diese Zeile entfernen.
+          "ghostfolio.mauritiusberger.de" = {
+            path = "/api/v1/health";
+            conditions = [ "[STATUS] == 200" ];
+            alert = false;
+          };
+        }
+        # Kurz-Adressen auf Lukas' Dienste (charts/root-app/templates/redirects.yaml):
+        # hier läuft kein Backend, nur ein 302 am Gateway. Geprüft wird GENAU
+        # das — Redirect + Zertifikat —, nicht das Ziel: Lukas' Server ist
+        # nicht unserer, und dass er fehlt, ist kein Alarm für diese Seite.
+        # Dass sich der Check lohnt, zeigte der erste Tag: die HTTPS-Route
+        # antwortete wegen `scheme: https` mit 404 (Commit c94db01).
+        # Neue Kurz-Adressen hier eintragen, sonst folgt der Standard-Check
+        # dem Redirect und prüft Lukas' Dienst mit.
+        //
+          lib.genAttrs
+            [
+              "jellyfin.mauritiusberger.de"
+              "seerr.mauritiusberger.de"
+              "netbird.mauritiusberger.de"
+            ]
+            (_: {
+              group = "kurz-adressen";
+              client.ignore-redirect = true;
+              conditions = [ "[STATUS] == 302" ];
+            });
+      };
+      discoveryJson = builtins.toJSON discoveryConfig;
+
+      # Einmal als initContainer (`--once`), einmal als Sidecar — gleiche Mounts.
+      discoveryContainer =
+        extra:
+        {
+          name = "discovery";
+          image = discoveryImg.image;
+          imagePullPolicy = "IfNotPresent";
+          env = [
+            {
+              name = "GATEWAY_NAMESPACE";
+              value = gateway.namespace;
+            }
+            {
+              name = "GATEWAY_NAME";
+              value = gateway.name;
+            }
+            {
+              name = "DISCOVERY_CONFIG";
+              value = "/discovery/discovery.json";
+            }
+            {
+              name = "OUT_DIR";
+              value = "/out";
+            }
+            {
+              # Ein neuer Listener ist nach spätestens 60 s + 30 s (Gatus'
+              # mtime-Poll) auf der Seite.
+              name = "INTERVAL";
+              value = "60";
+            }
+          ];
+          volumeMounts = [
+            {
+              name = "config";
+              mountPath = "/out";
+            }
+            {
+              name = "discovery";
+              mountPath = "/discovery";
+              readOnly = true;
+            }
+            {
+              name = "kube-api";
+              mountPath = "/var/run/secrets/kubernetes.io/serviceaccount";
+              readOnly = true;
+            }
+          ];
+          resources = {
+            requests = {
+              cpu = "5m";
+              memory = "16Mi";
+            };
+            limits.memory = "64Mi";
+          };
+        }
+        // extra;
 
       oidcSecretFile = ../secrets/gatus-oidc-secret.age;
       ntfyTopicFile = ../secrets/gatus-ntfy-topic.age;
@@ -132,42 +387,143 @@
               success-threshold: 2
               send-on-resolved: true
 
+        # Schreibt der Sidecar eine kaputte discovered.yaml (z.B. doppelter
+        # Endpoint-Key), läuft Gatus mit der alten Config weiter, statt beim
+        # Neuladen zu panicen.
+        skip-invalid-config-update: true
+
+        # Die Checks je HTTPS-Listener am Gateway (chat, idm, grocy, n8n, …)
+        # stehen NICHT hier, sondern kommen aus /config/discovered.yaml — siehe
+        # Modulkopf und `discoveryConfig`. Hier nur, was die Discovery nicht
+        # sehen kann.
         endpoints:
-          # CERTIFICATE_EXPIRATION fängt einen Fehler ab, den sonst NICHTS
-          # meldet: laut charts/root-app/templates/gateway.yaml ignoriert
-          # cert-manager die Gateway-Annotation STILL, wenn `gatewayAPI.enabled`
-          # fehlt — kein Fehler, nur nie ein Zertifikat. 240h Vorlauf reicht für
-          # zwei Renewal-Versuche von Let's Encrypt.
-          - name: open-webui
+          # Kein eigener Listener, sondern ein Pfad an chat.steinaberfein.de.
+          # Der Datei-Sidecar läuft im bricklink-mcp-Pod und /healthz liegt vor
+          # der Signatur-Prüfung (modules/bricklink-mcp.nix) — 200 heißt also:
+          # Pod lebt, Route steht. Der MCP selbst ist per Policy nur für
+          # open-webui offen; den deckt chat-e2e ab.
+          - name: bricklink-mcp
             group: public
-            url: https://chat.steinaberfein.de/health
-            interval: 2m
-            conditions:
-              - "[STATUS] == 200"
-              - "[RESPONSE_TIME] < 3000"
-              - "[CERTIFICATE_EXPIRATION] > 240h"
-            alerts:
-              - type: ntfy
-
-          - name: kanidm
-            group: public
-            url: ${idmOrigin}/status
-            interval: 2m
-            conditions:
-              - "[STATUS] == 200"
-              - "[CERTIFICATE_EXPIRATION] > 240h"
-            alerts:
-              - type: ntfy
-
-          - name: steinaberfein.de
-            group: public
-            url: https://www.steinaberfein.de/
+            url: https://chat.steinaberfein.de/bricklink-exports/healthz
             interval: 5m
             conditions:
-              - "[STATUS] < 400"
+              - "[STATUS] == 200"
+            alerts:
+              - type: ntfy
+                description: "bricklink-mcp: Export-Download (chat.steinaberfein.de/bricklink-exports) antwortet nicht"
+
+          # ── Azure-Lab (nix-config/lab, eigener Cluster, eigenes Gateway) ───
+          # Für die Discovery unsichtbar. /ping beantwortet oauth2-proxy selbst,
+          # ohne Login — der Check sagt also: VM an, Gateway und Zertifikat
+          # gut, Login-Proxy lebt. Ob Hermes dahinter antwortet, sagt er NICHT;
+          # dafür bräuchte es eine skip_auth_route in lab/modules/user-web.nix.
+          - name: hermes-dashboard
+            group: lab
+            url: https://hermes.mberger.lab.mauritiusberger.de/ping
+            interval: 5m
+            conditions:
+              - "[STATUS] == 200"
               - "[CERTIFICATE_EXPIRATION] > 240h"
             alerts:
               - type: ntfy
+                description: "Azure-Lab: hermes.mberger.lab.mauritiusberger.de nicht erreichbar (VM, Gateway oder oauth2-proxy)"
+
+          # ── Im Cluster, ohne öffentlichen Weg ──────────────────────────────
+          # Alles hier hat KEINE NetworkPolicy, der Check weicht also nichts
+          # auf (Stand 2026-10-19 verifiziert). Die Namen sagen, wer betroffen
+          # ist, wenn's rot wird — postgres und redis allein sagen das nicht.
+          - name: argocd
+            group: cluster
+            url: http://argo-cd-argocd-server.default.svc/healthz
+            interval: 2m
+            conditions:
+              - "[STATUS] == 200"
+            alerts:
+              - type: ntfy
+                description: "ArgoCD-Server antwortet nicht — Deploys aus charts/root-app (grocy, n8n, paperless, Website) hängen"
+
+          - name: signal-api (n8n)
+            group: cluster
+            url: http://signal-api.default.svc:8080/v1/health
+            interval: 2m
+            conditions:
+              - "[STATUS] == 204"
+            alerts:
+              - type: ntfy
+                description: "signal-api antwortet nicht — n8n kann keine Signal-Nachrichten senden"
+
+          # n8n hängt NICHT daran (kein DB_TYPE gesetzt → SQLite).
+          - name: postgres (paperless, ghostfolio)
+            group: cluster
+            url: tcp://postgres.default.svc:5432
+            interval: 2m
+            conditions:
+              - "[CONNECTED] == true"
+            alerts:
+              - type: ntfy
+                description: "postgres in default nicht erreichbar — paperless und ghostfolio ohne Datenbank"
+
+          - name: redis (paperless, ghostfolio)
+            group: cluster
+            url: tcp://redis.default.svc:6379
+            interval: 2m
+            conditions:
+              - "[CONNECTED] == true"
+            alerts:
+              - type: ntfy
+                description: "redis in default nicht erreichbar — paperless-Verarbeitung und ghostfolio stehen"
+
+          # Garage-S3 als Zwischenablage velero → NAS (modules/backup-store.nix).
+          # Ohne Credentials antwortet ein gesundes Garage mit 403 + S3-XML —
+          # das beweist mehr als ein offener Port.
+          - name: backup-store (velero-nas-mirror)
+            group: cluster
+            url: http://backup-store.backup-store.svc:3900/
+            interval: 5m
+            conditions:
+              - "[STATUS] == 403"
+            alerts:
+              - type: ntfy
+                description: "backup-store (Garage S3) antwortet nicht — velero nas-mirror und der NAS-Pull scheitern"
+
+          # ── NetBird (Lukas' Server, netbird.lukashirsch.de) ─────────────────
+          # Pull, weil der Server öffentlich ist. Über dieses Mesh läuft der
+          # Mac↔NAS-Weg von unterwegs (DEPLOY_VIA=mesh) — fällt es aus, soll das
+          # nicht erst beim nächsten Deploy auffallen. restic zum NAS nutzt das
+          # Mesh NICHT: der ssh-Alias `nas` zeigt fest auf die LAN-IP, Backups
+          # zum NAS laufen bewusst nur zu Hause (Entscheidung 2026-09-30).
+          # Die Wurzel `/` ist nur das statische Dashboard (200 auch ohne
+          # Backend), deshalb die zwei Dienste, die Peers wirklich brauchen:
+          #   • management: `/api/users` ohne Token → 401 mit NetBird-JSON
+          #     ({"message":…,"code":401}). Der JSON-Code beweist, dass der
+          #     Management-Server selbst antwortet, nicht ein Proxy-Fehler.
+          #   • relay: `/relay` ohne WebSocket-Upgrade → 426.
+          # Signal fehlt bewusst: reines gRPC, dafür hat Gatus keinen Check,
+          # der ohne NetBirds Protokoll auskommt.
+          # Stand 2026-09-29 so beobachtet. 5m statt 2m: fremder Server,
+          # sparsam pollen.
+          - name: management
+            group: netbird
+            url: https://netbird.lukashirsch.de/api/users
+            interval: 5m
+            conditions:
+              - "[STATUS] == 401"
+              - "[BODY].code == 401"
+              - "[CERTIFICATE_EXPIRATION] > 240h"
+            alerts:
+              - type: ntfy
+                description: "NetBird-Management (netbird.lukashirsch.de) antwortet nicht"
+
+          - name: relay
+            group: netbird
+            url: https://netbird.lukashirsch.de/relay
+            interval: 5m
+            conditions:
+              - "[STATUS] == 426"
+              - "[BODY] == pat(*WebSocket*)"
+            alerts:
+              - type: ntfy
+                description: "NetBird-Relay (netbird.lukashirsch.de) antwortet nicht"
 
         # ── Totmann-Schalter ──────────────────────────────────────────────────
         # Kein Poller kommt hier heran: der NAS steht hinter einem Speedport
@@ -183,49 +539,56 @@
         #
         # failure-threshold 1 bei reinen Heartbeats, aus zwei Gründen:
         #   • Ein Fehler heißt hier schon „ein ganzes Intervall kein Push“ —
-        #     beim NAS drei verpasste Pushes. Das Argument „ein verlorener
+        #     beim NAS vier verpasste Pushes. Das Argument „ein verlorener
         #     Request ist kein Ausfall“ ist im Intervall bereits eingepreist.
         #   • Gatus schreibt nur JEDES ZWEITE Intervall einen Fehler: beim
         #     nächsten Tick zählt sein eigenes Fehlerergebnis als „Ergebnis
         #     innerhalb des Intervalls“ (watchdog/external_endpoint.go,
-        #     HasEndpointStatusNewerThan). Mit Schwelle 2 käme der NAS-Alarm
-        #     erst nach ~2¼ h, der restic-Alarm erst nach bis zu 90 h.
+        #     HasEndpointStatusNewerThan). Mit Schwelle 2 bräuchte der
+        #     NAS-Alarm drei Intervalle, der restic-Alarm bis zu 90 h.
         # Effektiv alarmiert Gatus damit nach 1–2 Intervallen Stille.
         external-endpoints:
-          # Push alle 15 min aus einem systemd-Timer auf dem NAS.
+          # Push alle 30 s aus einem Dauerdienst auf dem NAS
+          # (homelab/modules/features/nas-heartbeat.nix, intervalSec). 2m =
+          # vier verpasste Pushes; Alarm 2–4 min nach dem Ausfall, auch kurze
+          # Ausfälle ab ~4 min fallen sicher auf (vorher 15 min/45m: nur lange).
+          # Beim Ändern beide Seiten, NAS zuerst deployen.
           - name: nas
             group: home
             token: ''${GATUS_TOKEN_NAS}
             heartbeat:
-              interval: 45m
+              interval: 2m
             alerts:
               - type: ntfy
                 failure-threshold: 1
-                description: "NAS meldet sich nicht (Push alle 15 min)"
+                description: "NAS meldet sich nicht (Push alle 30 s)"
 
           # Die beiden restic-Ziele des Macs, gepusht vom Wrapper in
           # nix-config/base/modules/restic.nix — success=true nur bei rc=0.
-          # Lauf ist täglich um 03:00; 30h lassen einen ausgefallenen Lauf
-          # durchgehen, zwei nicht.
+          # Lauf ist täglich um 03:00.
+          #
+          # Nur melden, worum man sich kümmern kann (Entscheidung 2026-10-03,
+          # ersetzt die vom 2026-09-30 „unterwegs → ein Alarm“): Ist das Ziel
+          # nicht erreichbar (unterwegs bzw. offline), überspringt der Wrapper
+          # den Lauf und pusht GAR NICHTS (`probe` in restic.nix). Ein Push mit
+          # success=false heißt also: Ziel war da, Backup trotzdem kaputt, und
+          # alarmiert sofort. Stille alarmiert erst nach 168h; weil Gatus nur
+          # jedes zweite Intervall einen Fehler schreibt (s. oben), effektiv
+          # nach 7–14 Tagen. Ein Wochenende mit zugeklapptem Mac oder eine
+          # kurze Reise bleiben damit still, eine Woche Funkstille nicht.
+          #
+          # success-threshold 1: bei einem Lauf pro Tag hieße der Default 2,
+          # dass die Entwarnung erst nach ZWEI guten Tagen käme.
           - name: restic-nas
             group: backup
             token: ''${GATUS_TOKEN_MAC}
             heartbeat:
-              interval: 30h
+              interval: 168h
             alerts:
               - type: ntfy
                 failure-threshold: 1
-                description: "restic-Backup Mac → NAS ausgeblieben oder fehlgeschlagen"
-
-          - name: restic-azure
-            group: backup
-            token: ''${GATUS_TOKEN_MAC}
-            heartbeat:
-              interval: 30h
-            alerts:
-              - type: ntfy
-                failure-threshold: 1
-                description: "restic-Backup Mac → Azure ausgeblieben oder fehlgeschlagen"
+                success-threshold: 1
+                description: "restic-Backup Mac → NAS fehlgeschlagen (Ziel erreichbar) oder seit 7+ Tagen still"
 
           # chat-e2e läuft per systemd-Timer auf netcup alle 15 min
           # (modules/chat-e2e.nix). Der Heartbeat macht aus dem Test einen
@@ -243,9 +606,51 @@
               - type: ntfy
                 description: "chat-e2e rot oder ausgeblieben"
 
-          # velero fehlt hier bewusst: sein Schedule steht im Chart-Repo, nicht
-          # in diesem Flake. Erst den Takt festnageln, dann den Heartbeat — ein
-          # geratenes Intervall produziert nur Fehlalarme.
+          # ── velero (Schedules im Chart: not-just-a-developer.com,
+          # deploy/chart/values.yaml) ──────────────────────────────────────
+          #   daily-backup 02:00 → Azure Blob, nas-mirror 03:00 → backup-store.
+          # Gepusht STÜNDLICH von modules/velero-heartbeat.nix: success=true
+          # nur, wenn der letzte abgeschlossene Lauf `Completed` und jünger als
+          # 26 h ist. Ein Push meldet damit beides, kaputtes Backup und
+          # ausgesetzten Schedule; 3h ohne Push heißt: der Pusher (oder netcup)
+          # selbst ist weg. Ein Fehlschlag ist hier kein wackliger Request,
+          # sondern Zustand → Schwelle 1 in beide Richtungen.
+          - name: velero-azure
+            group: backup
+            token: ''${GATUS_TOKEN_CLUSTER}
+            heartbeat:
+              interval: 3h
+            alerts:
+              - type: ntfy
+                failure-threshold: 1
+                success-threshold: 1
+                description: "velero daily-backup → Azure: letzter Lauf nicht Completed, älter als 26 h, oder Pusher still"
+
+          - name: velero-nas-mirror
+            group: backup
+            token: ''${GATUS_TOKEN_CLUSTER}
+            heartbeat:
+              interval: 3h
+            alerts:
+              - type: ntfy
+                failure-threshold: 1
+                success-threshold: 1
+                description: "velero nas-mirror → backup-store: letzter Lauf nicht Completed, älter als 26 h, oder Pusher still"
+
+          # Dritter Schritt der Kette: der NAS zieht backup-store täglich um
+          # 05:00 in seine Garage (homelab/modules/features/nas-velero-mirror.nix,
+          # ExecStopPost). Holt verpasste Läufe nach (Persistent), daher 30h —
+          # wie maxAgeHours des Tagesberichts. Effektiv Alarm nach 30–60 h Stille.
+          - name: nas-velero-pull
+            group: backup
+            token: ''${GATUS_TOKEN_NAS}
+            heartbeat:
+              interval: 30h
+            alerts:
+              - type: ntfy
+                failure-threshold: 1
+                success-threshold: 1
+                description: "NAS-Pull der velero-Backups fehlgeschlagen oder seit 30+ h still"
       '';
     in
     {
@@ -350,6 +755,63 @@
             data."config.yaml" = configYaml;
           }
           {
+            apiVersion = "v1";
+            kind = "ConfigMap";
+            metadata = {
+              name = "gatus-discovery";
+              namespace = ns;
+            };
+            data."discovery.json" = discoveryJson;
+          }
+          # Leserecht auf GENAU ein Objekt: das Gateway. Kein list/watch, keine
+          # Secrets, kein anderer Namespace. Das Token bekommt nur der
+          # discovery-Container (projected volume unten), nicht Gatus selbst.
+          {
+            apiVersion = "v1";
+            kind = "ServiceAccount";
+            metadata = {
+              name = "gatus";
+              namespace = ns;
+            };
+            automountServiceAccountToken = false;
+          }
+          {
+            apiVersion = "rbac.authorization.k8s.io/v1";
+            kind = "Role";
+            metadata = {
+              name = "gatus-discovery";
+              namespace = gateway.namespace;
+            };
+            rules = [
+              {
+                apiGroups = [ "gateway.networking.k8s.io" ];
+                resources = [ "gateways" ];
+                resourceNames = [ gateway.name ];
+                verbs = [ "get" ];
+              }
+            ];
+          }
+          {
+            apiVersion = "rbac.authorization.k8s.io/v1";
+            kind = "RoleBinding";
+            metadata = {
+              name = "gatus-discovery";
+              namespace = gateway.namespace;
+            };
+            roleRef = {
+              apiGroup = "rbac.authorization.k8s.io";
+              kind = "Role";
+              name = "gatus-discovery";
+            };
+            subjects = [
+              {
+                kind = "ServiceAccount";
+                name = "gatus";
+                namespace = ns;
+              }
+            ];
+          }
+          {
             # local-path, nicht Longhorn — das ist am 2026-09-28 gestrichen
             # worden. Ein Verlust dieses Volumes kostet die Historie, sonst
             # nichts: Konfiguration kommt aus dem Flake, der Zustand aus den
@@ -381,10 +843,13 @@
               template = {
                 metadata = {
                   labels.app = "gatus";
-                  annotations."checksum/config" = builtins.hashString "sha256" configYaml;
+                  annotations."checksum/config" = builtins.hashString "sha256" (configYaml + discoveryJson);
                 };
                 spec = {
                   enableServiceLinks = false;
+                  serviceAccountName = "gatus";
+                  # Token nur per projected volume an den discovery-Container.
+                  automountServiceAccountToken = false;
                   securityContext = {
                     runAsUser = 1000;
                     runAsGroup = 1000;
@@ -392,15 +857,54 @@
                   };
                   volumes = [
                     {
+                      # /config: Gatus liest das Verzeichnis. Darin
+                      # discovered.yaml (Sidecar) und static/ (ConfigMap).
                       name = "config";
+                      emptyDir = { };
+                    }
+                    {
+                      name = "config-static";
                       configMap.name = "gatus-config";
+                    }
+                    {
+                      name = "discovery";
+                      configMap.name = "gatus-discovery";
+                    }
+                    {
+                      name = "kube-api";
+                      projected.sources = [
+                        {
+                          serviceAccountToken = {
+                            path = "token";
+                            expirationSeconds = 3607;
+                          };
+                        }
+                        {
+                          configMap = {
+                            name = "kube-root-ca.crt";
+                            items = [
+                              {
+                                key = "ca.crt";
+                                path = "ca.crt";
+                              }
+                            ];
+                          };
+                        }
+                      ];
                     }
                     {
                       name = "data";
                       persistentVolumeClaim.claimName = "gatus-data";
                     }
                   ];
+                  initContainers = [
+                    (discoveryContainer {
+                      name = "discovery-init";
+                      args = [ "--once" ];
+                    })
+                  ];
                   containers = [
+                    (discoveryContainer { })
                     {
                       name = "gatus";
                       image = img.image;
@@ -409,8 +913,18 @@
                       envFrom = [ { secretRef.name = "gatus-secrets"; } ];
                       volumeMounts = [
                         {
+                          # NICHT readOnly: runc legt den Mountpoint für
+                          # /config/static IN diesem Volume an, und auf einem
+                          # ro-Bind scheitert das ("make mountpoint …: read-only
+                          # file system", 2026-10-19). Gatus schreibt hier nichts.
                           name = "config";
                           mountPath = "/config";
+                        }
+                        {
+                          # Unterverzeichnis im emptyDir; Gatus' walkConfigDir
+                          # überspringt die `..data`-Symlinks der ConfigMap.
+                          name = "config-static";
+                          mountPath = "/config/static";
                           readOnly = true;
                         }
                         {

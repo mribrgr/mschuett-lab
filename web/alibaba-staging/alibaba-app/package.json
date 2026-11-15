@@ -1,0 +1,9 @@
+{
+  "name": "alibaba-app",
+  "private": true,
+  "type": "commonjs",
+  "main": "app.js",
+  "engines": {
+    "node": ">=16"
+  }
+}

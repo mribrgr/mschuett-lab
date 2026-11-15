@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="de" class="no-js">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tisch reservieren · Ali Baba Dresden</title>
+<meta name="description" content="Reservieren Sie Ihren Tisch im Ali Baba Dresden – Datum, Uhrzeit und Personenzahl wählen, wir bestätigen telefonisch.">
+<meta name="robots" content="noindex, nofollow">
+<link rel="canonical" href="https://alibaba-blau.mauritiusberger.de/reservieren/">
+<meta name="theme-color" content="#161a35">
+<meta property="og:type" content="website">
+<meta property="og:locale" content="de_DE">
+<meta property="og:site_name" content="Restaurant Ali Baba Dresden">
+<meta property="og:title" content="Tisch reservieren · Ali Baba Dresden">
+<meta property="og:description" content="Reservieren Sie Ihren Tisch im Ali Baba Dresden – Datum, Uhrzeit und Personenzahl wählen, wir bestätigen telefonisch.">
+<meta property="og:url" content="https://alibaba-blau.mauritiusberger.de/reservieren/">
+<meta property="og:image" content="https://alibaba-blau.mauritiusberger.de/img/raum02-825.jpg">
+<link rel="icon" type="image/png" sizes="48x48" href="/img/favicon-48.png">
+<link rel="apple-touch-icon" href="/img/icon-180.png">
+<link rel="preload" href="/fonts/alegreya-sans-400-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/fonts/aref-ruqaa-400-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/assets/site.a1233551e6.css">
+<script src="/assets/site.1fb019a96a.js"></script>
+
+</head>
+<body>
+<div class="staging-banner">Testumgebung – nicht die echte Website. Anfragen landen nicht beim Restaurant.</div>
+<header class="site-header" data-header>
+  <div class="wrap header-bar">
+    <a class="logo-link" href="/" aria-label="Ali Baba – zur Startseite"><picture><source type="image/webp" srcset="/img/logo-360.webp"><img src="/img/logo-360.png" alt="Ali Baba" width="360" height="252"></picture></a>
+    <nav class="nav-desk" aria-label="Hauptmenü"><a href="/speisekarte/">Speisekarte</a><a href="/raeume/">Räume & Bilder</a><a href="/feiern/">Feiern & Catering</a><a href="/anfahrt/">Anfahrt</a><a class="btn-res" href="/reservieren/" data-open-res>Reservieren</a></nav>
+    <div class="nav-mob"><a class="btn-res" href="/reservieren/" data-open-res>Reservieren</a><button class="menu-toggle" type="button" data-menu-toggle aria-expanded="false" aria-controls="nav-drawer" aria-label="Menü">☰</button></div>
+  </div>
+  <nav class="nav-drawer" id="nav-drawer" aria-label="Menü"><a href="/speisekarte/">Speisekarte</a><a href="/raeume/">Räume & Bilder</a><a href="/feiern/">Feiern & Catering</a><a href="/anfahrt/">Anfahrt</a></nav>
+</header>
+<main id="inhalt">
+
+<div class="wrap page res-page">
+  <div class="res-panel" data-form-wrap>
+    <div class="res-head"><span>Ihr Abend bei uns</span></div>
+    <form class="form" method="post" action="/api/anfrage" data-form="reservierung">
+    <input type="hidden" name="typ" value="reservierung"><input type="hidden" name="ts" value=""><div class="hp" aria-hidden="true"><label>Firma <input type="text" name="firma" tabindex="-1" autocomplete="off"></label></div>
+    <div class="picker" data-picker="page-day" data-required="1">
+    <span class="field-label" id="page-day-label">Datum</span>
+    <div class="picker-js">
+      <div class="picker-nav"><button type="button" data-prev aria-label="Frühere Tage">‹</button><span data-range aria-live="polite"></span><button type="button" data-next aria-label="Spätere Tage">›</button></div>
+      <div class="days" data-days role="group" aria-labelledby="page-day-label"></div>
+    </div>
+    <input class="date-fallback" type="date" name="datum" id="page-day-date" aria-labelledby="page-day-label" required>
+  </div>
+    <fieldset class="times"><legend class="field-label">Uhrzeit</legend><label class="chip"><input type="radio" name="uhrzeit" value="17:30"><span>17:30</span></label><label class="chip"><input type="radio" name="uhrzeit" value="18:00"><span>18:00</span></label><label class="chip"><input type="radio" name="uhrzeit" value="18:30"><span>18:30</span></label><label class="chip"><input type="radio" name="uhrzeit" value="19:00" checked><span>19:00</span></label><label class="chip"><input type="radio" name="uhrzeit" value="19:30"><span>19:30</span></label><label class="chip"><input type="radio" name="uhrzeit" value="20:00"><span>20:00</span></label><label class="chip"><input type="radio" name="uhrzeit" value="20:30"><span>20:30</span></label><label class="chip"><input type="radio" name="uhrzeit" value="21:00"><span>21:00</span></label><label class="chip"><input type="radio" name="uhrzeit" value="21:30"><span>21:30</span></label><label class="chip"><input type="radio" name="uhrzeit" value="22:00"><span>22:00</span></label></fieldset>
+    <div class="stepper-row"><label for="page-ppl">Personen</label><div class="stepper"><button type="button" data-step="-1" aria-label="Eine Person weniger">−</button><input id="page-ppl" name="personen" type="number" inputmode="numeric" min="1" max="30" value="2" required><button type="button" data-step="1" aria-label="Eine Person mehr">+</button></div></div>
+    <label><span class="sr-only">Ihr Name</span><input class="input" name="name" placeholder="Ihr Name" autocomplete="name" required minlength="2" maxlength="80"></label>
+    <label><span class="sr-only">Telefonnummer</span><input class="input" name="telefon" type="tel" placeholder="Telefonnummer" autocomplete="tel" required minlength="6" maxlength="30"></label>
+    <div class="form-error" role="alert" hidden></div>
+    <button class="submit" type="submit">Reservierung anfragen</button>
+    <p class="form-note">Wir bestätigen telefonisch. Ihre Angaben verwenden wir nur für Ihre Reservierung – mehr in der <a href="/datenschutz/">Datenschutzerklärung</a>.</p>
+  </form>
+  <div class="done" data-done hidden tabindex="-1">
+    <div class="arab" lang="ar">أهلاً وسهلاً</div>
+    <div class="done-text" data-summary></div>
+    <div class="done-sub">Wir bestätigen telefonisch. Lassen Sie sich verzaubern!</div>
+    <button type="button" class="btn btn-outline" data-close>Schließen</button>
+  </div>
+  </div>
+</div>
+</main>
+<footer class="site-footer">
+  <div class="wrap footer-bar">
+    <span><span class="footer-brand">Ali Baba</span>  · Weimarische Straße 6 · 01127 Dresden<span class="m-hide"> · </span><span class="m-br"></span><a href="tel:+493518400333">0351 / 84 00 333</a></span>
+    <div class="footer-links"><div class="social"><a href="https://www.instagram.com/alibabadresden/" target="_blank" rel="noopener" aria-label="Instagram" title="Instagram"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="5"></rect><circle cx="12" cy="12" r="4.2"></circle><circle cx="17.4" cy="6.6" r="1.1" fill="currentColor" stroke="none"></circle></svg></a><a href="https://www.facebook.com/alibaba.dresden" target="_blank" rel="noopener" aria-label="Facebook" title="Facebook"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M13.5 21v-7.5h2.6l.4-3h-3V8.6c0-.9.3-1.5 1.5-1.5h1.6V4.4c-.3 0-1.2-.1-2.3-.1-2.3 0-3.9 1.4-3.9 4v2.2H7.8v3h2.6V21h3.1z"></path></svg></a></div><a href="/impressum/">Impressum</a><a href="/datenschutz/">Datenschutz</a></div>
+  </div>
+</footer>
+
+
+</body>
+</html>

@@ -1,0 +1,34 @@
+# Erzeugt von scripts/build.ts – nicht von Hand ändern
+ErrorDocument 404 /404.html
+<IfModule mod_alias.c>
+  Redirect 301 /index.htm /
+  Redirect 301 /aktuelles.html /
+  Redirect 301 /index_wieder_offen.html /
+  Redirect 301 /postinfo.html /
+  Redirect 301 /vorschau.htm /
+  Redirect 301 /design.htm /
+  Redirect 301 /speisekarte.html /speisekarte/
+  Redirect 301 /speisekarte.pdf /speisekarte/
+  Redirect 301 /kleinespeisekarte.pdf /speisekarte/
+  Redirect 301 /speisekarte_2024.pdf /speisekarte/
+  Redirect 301 /speisekarte_2021.pdf /speisekarte/
+  Redirect 301 /speisekarte_alt.pdf /speisekarte/
+  Redirect 301 /speisekarte_alt1.pdf /speisekarte/
+  Redirect 301 /bilder.html /raeume/
+  Redirect 301 /catering.html /feiern/
+  Redirect 301 /lieferung.html /feiern/
+  Redirect 301 /anfahrt.html /anfahrt/
+  Redirect 301 /kontakt.html /anfahrt/
+  Redirect 301 /impressum.html /impressum/
+  Redirect 301 /datenschutz.html /datenschutz/
+  RedirectMatch 301 ^\/neu_2026\/.* /
+  RedirectMatch 301 ^\/index_alt\/.* /
+  RedirectMatch 301 ^\/html\/.* /
+</IfModule>
+<IfModule mod_headers.c>
+  <FilesMatch "\.(css|js|woff2)$">
+    Header set Cache-Control "public, max-age=31536000, immutable"
+  </FilesMatch>
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set Referrer-Policy "strict-origin-when-cross-origin"
+</IfModule>
